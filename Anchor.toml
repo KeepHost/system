@@ -1,0 +1,19 @@
+[toolchain]
+anchor_version = "0.31.2"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+keephost_pool = "CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW"
+
+[programs.devnet]
+keephost_pool = "CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW"
+
+[provider]
+cluster = "devnet"
+wallet = "keys/deployer.json"
+
+[scripts]
+test = "echo no anchor tests here, see scripts/"

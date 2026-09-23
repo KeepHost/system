@@ -1,0 +1,466 @@
+//! KeepHost — non-custodial pool on Solana.
+//!
+//! Deposits are held by a vault PDA: an address with no private key. The only
+//! instruction that moves funds is `withdraw`, and it requires a valid
+//! zero-knowledge proof. There is no administrator withdrawal instruction, no
+//! transfer of authority over the vault, and no path to close it.
+//! `set_paused` can only stop new deposits; it cannot block a withdrawal or
+//! touch the funds.
+
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::solana_program::rent::Rent as SolRent;
+use anchor_lang::solana_program::system_instruction;
+use groth16_solana::groth16::Groth16Verifier;
+use solana_poseidon::{hashv, Endianness, Parameters};
+
+pub mod verifying_key;
+use verifying_key::VERIFYINGKEY;
+
+pub mod zeros;
+use zeros::ZEROS;
+
+declare_id!("CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW");
+
+pub const LEVELS: usize = 20;
+pub const ROOT_HISTORY: usize = 32;
+pub const PUBLIC_INPUTS: usize = 9;
+
+pub const FIELD_MODULUS: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+
+#[program]
+pub mod keephost_pool {
+    use super::*;
+
+    /// Opens a pool for a fixed denomination (in lamports) and funds the vault
+    /// up to the rent-exempt minimum.
+    pub fn initialize(ctx: Context<Initialize>, denomination: u64, pause_authority: Option<Pubkey>) -> Result<()> {
+        let rent_min = SolRent::get()?.minimum_balance(0);
+        require!(denomination >= rent_min, PoolError::BadDenomination);
+
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.creator.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            rent_min,
+        )?;
+
+        let pool = &mut ctx.accounts.pool.load_init()?;
+        pool.bump = ctx.bumps.pool;
+        pool.vault_bump = ctx.bumps.vault;
+        pool.creator = ctx.accounts.creator.key();
+        pool.denomination = denomination;
+        pool.vault_floor = rent_min;
+        pool.next_index = 0;
+        pool.current_root_index = 0;
+        pool.deposits = 0;
+        pool.paused = 0;
+        pool.pause_authority = pause_authority.unwrap_or_default();
+        for i in 0..LEVELS {
+            pool.filled_subtrees[i] = ZEROS[i];
+        }
+        // Every root slot starts at the empty-tree root, so a zero root can
+        // never pass for a known one.
+        for i in 0..ROOT_HISTORY {
+            pool.roots[i] = ZEROS[LEVELS];
+        }
+
+        emit!(PoolOpened {
+            pool: ctx.accounts.pool.key(),
+            creator: pool.creator,
+            denomination,
+        });
+        Ok(())
+    }
+
+    /// Deposits the exact denomination and records the commitment in the tree.
+    pub fn deposit(ctx: Context<Deposit>, commitment: [u8; 32]) -> Result<()> {
+        let denomination = {
+            let pool = ctx.accounts.pool.load()?;
+            require!(pool.paused == 0, PoolError::Paused);
+            require!(is_field_element(&commitment), PoolError::NotFieldElement);
+            require!(commitment != [0u8; 32], PoolError::NotFieldElement);
+            require!((pool.next_index as usize) < (1usize << LEVELS), PoolError::TreeFull);
+            pool.denomination
+        };
+
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.depositor.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            denomination,
+        )?;
+
+        let pool = &mut ctx.accounts.pool.load_mut()?;
+        let leaf_index = pool.next_index;
+        let root = insert_leaf(pool, commitment)?;
+        pool.next_index = leaf_index + 1;
+        pool.deposits = pool.deposits.saturating_add(1);
+        let slot = (pool.current_root_index as usize + 1) % ROOT_HISTORY;
+        pool.current_root_index = slot as u8;
+        pool.roots[slot] = root;
+
+        emit!(Deposited {
+            pool: ctx.accounts.pool.key(),
+            commitment,
+            leaf_index,
+            root,
+            at: Clock::get()?.unix_timestamp,
+        });
+        Ok(())
+    }
+
+    /// Withdraws the denomination to `recipient`, on proof that the caller knows
+    /// the secret of a deposit in the tree. `fee` is paid to the relayer.
+    pub fn withdraw<'info>(
+        ctx: Context<'_, '_, '_, 'info, Withdraw<'info>>,
+        proof_a: [u8; 64],
+        proof_b: [u8; 128],
+        proof_c: [u8; 64],
+        root: [u8; 32],
+        nullifier_hash: [u8; 32],
+        fee: u64,
+    ) -> Result<()> {
+        let pool_key = ctx.accounts.pool.key();
+        let (denomination, vault_bump) = {
+            let pool = ctx.accounts.pool.load()?;
+            require!(fee < pool.denomination, PoolError::FeeTooHigh);
+            require!(root != [0u8; 32], PoolError::UnknownRoot);
+            require!(is_field_element(&root) && is_field_element(&nullifier_hash), PoolError::NotFieldElement);
+            require!(pool.roots.contains(&root), PoolError::UnknownRoot);
+            (pool.denomination, pool.vault_bump)
+        };
+
+        // The nullifier account is created with `init`: if it already exists
+        // the instruction fails, so a deposit cannot be withdrawn twice.
+        let nullifier = &mut ctx.accounts.nullifier;
+        nullifier.pool = pool_key;
+        nullifier.hash = nullifier_hash;
+
+        let (recipient_hi, recipient_lo) = split(&ctx.accounts.recipient.key().to_bytes());
+        let (relayer_hi, relayer_lo) = split(&ctx.accounts.relayer.key().to_bytes());
+        let (pool_hi, pool_lo) = split(&pool_key.to_bytes());
+        let mut fee_field = [0u8; 32];
+        fee_field[24..].copy_from_slice(&fee.to_be_bytes());
+
+        let public_inputs: [[u8; 32]; PUBLIC_INPUTS] = [
+            root,
+            nullifier_hash,
+            recipient_hi,
+            recipient_lo,
+            relayer_hi,
+            relayer_lo,
+            fee_field,
+            pool_hi,
+            pool_lo,
+        ];
+        let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public_inputs, &VERIFYINGKEY)
+            .map_err(|_| error!(PoolError::BadProof))?;
+        verifier.verify().map_err(|_| error!(PoolError::BadProof))?;
+
+        let seeds: &[&[u8]] = &[b"vault", pool_key.as_ref(), &[vault_bump]];
+        pay_from_vault(&ctx, seeds, &ctx.accounts.recipient.to_account_info(), denomination - fee)?;
+        if fee > 0 {
+            pay_from_vault(&ctx, seeds, &ctx.accounts.relayer.to_account_info(), fee)?;
+        }
+
+        emit!(Withdrawn {
+            pool: pool_key,
+            nullifier_hash,
+            recipient: ctx.accounts.recipient.key(),
+            relayer: ctx.accounts.relayer.key(),
+            fee,
+            at: Clock::get()?.unix_timestamp,
+        });
+        Ok(())
+    }
+
+    /// Stops or resumes new deposits. Withdrawals stay possible while paused.
+    pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
+        let pool = &mut ctx.accounts.pool.load_mut()?;
+        require!(pool.pause_authority != Pubkey::default(), PoolError::NoPauseAuthority);
+        require_keys_eq!(pool.pause_authority, ctx.accounts.authority.key(), PoolError::NotPauseAuthority);
+        pool.paused = u8::from(paused);
+        emit!(PauseChanged { pool: ctx.accounts.pool.key(), paused });
+        Ok(())
+    }
+
+    /// Gives up the pause authority permanently.
+    pub fn renounce_pause(ctx: Context<SetPaused>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool.load_mut()?;
+        require!(pool.pause_authority != Pubkey::default(), PoolError::NoPauseAuthority);
+        require_keys_eq!(pool.pause_authority, ctx.accounts.authority.key(), PoolError::NotPauseAuthority);
+        pool.pause_authority = Pubkey::default();
+        pool.paused = 0;
+        emit!(PauseRenounced { pool: ctx.accounts.pool.key() });
+        Ok(())
+    }
+}
+
+fn pay_from_vault<'info>(
+    ctx: &Context<'_, '_, '_, 'info, Withdraw<'info>>,
+    seeds: &[&[u8]],
+    to: &AccountInfo<'info>,
+    amount: u64,
+) -> Result<()> {
+    invoke_signed(
+        &system_instruction::transfer(&ctx.accounts.vault.key(), &to.key(), amount),
+        &[
+            ctx.accounts.vault.to_account_info(),
+            to.clone(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+        &[seeds],
+    )?;
+    Ok(())
+}
+
+fn insert_leaf(pool: &mut Pool, leaf: [u8; 32]) -> Result<[u8; 32]> {
+    let mut index = pool.next_index as usize;
+    let mut current = leaf;
+    for level in 0..LEVELS {
+        let (left, right) = if index % 2 == 0 {
+            pool.filled_subtrees[level] = current;
+            (current, ZEROS[level])
+        } else {
+            (pool.filled_subtrees[level], current)
+        };
+        current = poseidon2(&left, &right)?;
+        index /= 2;
+    }
+    Ok(current)
+}
+
+fn poseidon2(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32]> {
+    let h = hashv(Parameters::Bn254X5, Endianness::BigEndian, &[left, right])
+        .map_err(|_| error!(PoolError::HashFailed))?;
+    Ok(h.to_bytes())
+}
+
+fn is_field_element(value: &[u8; 32]) -> bool {
+    for i in 0..32 {
+        if value[i] < FIELD_MODULUS[i] {
+            return true;
+        }
+        if value[i] > FIELD_MODULUS[i] {
+            return false;
+        }
+    }
+    false
+}
+
+/// Two 16-byte halves keep the encoding injective. In one piece an address
+/// reduces modulo p, letting a relayer redirect a withdrawal to a twin address.
+fn split(bytes: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let mut hi = [0u8; 32];
+    let mut lo = [0u8; 32];
+    hi[16..].copy_from_slice(&bytes[..16]);
+    lo[16..].copy_from_slice(&bytes[16..]);
+    (hi, lo)
+}
+
+#[account(zero_copy)]
+#[repr(C)]
+pub struct Pool {
+    pub creator: Pubkey,
+    pub pause_authority: Pubkey,
+    pub denomination: u64,
+    pub vault_floor: u64,
+    pub deposits: u64,
+    pub next_index: u32,
+    pub bump: u8,
+    pub vault_bump: u8,
+    pub paused: u8,
+    pub current_root_index: u8,
+    pub filled_subtrees: [[u8; 32]; LEVELS],
+    pub roots: [[u8; 32]; ROOT_HISTORY],
+}
+
+impl Pool {
+    pub const SIZE: usize = 8 + core::mem::size_of::<Pool>();
+}
+
+#[account]
+pub struct Nullifier {
+    pub pool: Pubkey,
+    pub hash: [u8; 32],
+}
+
+impl Nullifier {
+    pub const SIZE: usize = 8 + 32 + 32;
+}
+
+#[derive(Accounts)]
+#[instruction(denomination: u64)]
+pub struct Initialize<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    /// The creator is part of the seeds, so nobody can front-run a denomination
+    /// to claim the pause authority of a pool that is not theirs.
+    #[account(
+        init,
+        payer = creator,
+        space = Pool::SIZE,
+        seeds = [b"pool", creator.key().as_ref(), denomination.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub pool: AccountLoader<'info, Pool>,
+    /// CHECK: vault PDA, checked by its seeds; holds lamports only.
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Deposit<'info> {
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+    #[account(mut)]
+    pub pool: AccountLoader<'info, Pool>,
+    /// CHECK: vault PDA, checked by its seeds.
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(proof_a: [u8; 64], proof_b: [u8; 128], proof_c: [u8; 64], root: [u8; 32], nullifier_hash: [u8; 32])]
+pub struct Withdraw<'info> {
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+    pub pool: AccountLoader<'info, Pool>,
+    /// CHECK: vault PDA, checked by its seeds.
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
+    /// CHECK: destination address, bound by the proof's public inputs.
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+    #[account(
+        init,
+        payer = relayer,
+        space = Nullifier::SIZE,
+        seeds = [b"nullifier", pool.key().as_ref(), nullifier_hash.as_ref()],
+        bump
+    )]
+    pub nullifier: Account<'info, Nullifier>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetPaused<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut)]
+    pub pool: AccountLoader<'info, Pool>,
+}
+
+#[event]
+pub struct PoolOpened {
+    pub pool: Pubkey,
+    pub creator: Pubkey,
+    pub denomination: u64,
+}
+
+#[event]
+pub struct Deposited {
+    pub pool: Pubkey,
+    pub commitment: [u8; 32],
+    pub leaf_index: u32,
+    pub root: [u8; 32],
+    pub at: i64,
+}
+
+#[event]
+pub struct Withdrawn {
+    pub pool: Pubkey,
+    pub nullifier_hash: [u8; 32],
+    pub recipient: Pubkey,
+    pub relayer: Pubkey,
+    pub fee: u64,
+    pub at: i64,
+}
+
+#[event]
+pub struct PauseChanged {
+    pub pool: Pubkey,
+    pub paused: bool,
+}
+
+#[event]
+pub struct PauseRenounced {
+    pub pool: Pubkey,
+}
+
+#[error_code]
+pub enum PoolError {
+    #[msg("Denomination must cover the rent-exempt minimum")]
+    BadDenomination,
+    #[msg("New deposits are paused")]
+    Paused,
+    #[msg("Value is not a BN254 field element")]
+    NotFieldElement,
+    #[msg("This pool is full")]
+    TreeFull,
+    #[msg("Unknown or expired Merkle root")]
+    UnknownRoot,
+    #[msg("Relayer fee must be lower than the denomination")]
+    FeeTooHigh,
+    #[msg("Invalid withdrawal proof")]
+    BadProof,
+    #[msg("Poseidon hashing failed")]
+    HashFailed,
+    #[msg("This pool has no pause authority")]
+    NoPauseAuthority,
+    #[msg("Only the pause authority can do this")]
+    NotPauseAuthority,
+}
+
+/// Compile-time guard: a degenerate (all-zero) verifying key would make any
+/// proof verify, so refuse to build until the ceremony key is in place.
+const _: () = assert!(VERIFYINGKEY.vk_alpha_g1[0] != 0 || VERIFYINGKEY.vk_alpha_g1[1] != 0);
+const _: () = assert!(VERIFYINGKEY.nr_pubinputs == PUBLIC_INPUTS);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poseidon_matches_circomlib() {
+        for level in 0..LEVELS {
+            let computed = poseidon2(&ZEROS[level], &ZEROS[level]).expect("hash");
+            assert_eq!(
+                computed, ZEROS[level + 1],
+                "level {level}: the syscall Poseidon diverges from the circuit's"
+            );
+        }
+    }
+
+    #[test]
+    fn split_is_injective() {
+        let a = [0xffu8; 32];
+        let mut b = [0xffu8; 32];
+        b[0] = 0xfe;
+        assert_ne!(split(&a), split(&b));
+        let (hi, lo) = split(&a);
+        assert!(is_field_element(&hi) && is_field_element(&lo));
+    }
+
+    #[test]
+    fn field_bounds() {
+        assert!(!is_field_element(&FIELD_MODULUS));
+        let mut below = FIELD_MODULUS;
+        below[31] -= 1;
+        assert!(is_field_element(&below));
+        assert!(is_field_element(&[0u8; 32]));
+    }
+}
