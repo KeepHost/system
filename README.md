@@ -20,6 +20,7 @@
   <a href="SECURITY.md">Security</a> ·
   <a href="CEREMONY.md">Ceremony</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CHALLENGE.md">Break it</a> ·
   <a href="https://x.com/KeepHostLedger">@KeepHostLedger</a>
 </p>
 
