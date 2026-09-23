@@ -1,0 +1,9 @@
+{
+  "name": "keephost-pool",
+  "private": true,
+  "type": "module",
+  "description": "KeepHost non-custodial pool: Solana program, proof circuit, client, relayer",
+  "dependencies": {
+    "@solana/web3.js": "^1.99.0"
+  }
+}

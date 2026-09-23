@@ -1,0 +1,16 @@
+target/
+node_modules/
+circuits/*.ptau
+circuits/*.zkey
+circuits/withdraw_js/
+circuits/withdraw.r1cs
+circuits/withdraw.sym
+circuits/ptau.log
+keys/
+.anchor/
+test-ledger/
+
+# Ledgers left by solana-test-validator
+.ledger*/
+test-ledger*/
+validator*.log
