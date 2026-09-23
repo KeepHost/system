@@ -1,17 +1,17 @@
 name: test
 
-# Le test qui compte : circuit compilé, clé de preuve générée, programme
-# construit avec cette clé, puis sur un validateur local un dépôt, une preuve,
-# un retrait, et un second retrait avec le même reçu qui doit être refusé.
+# The test that matters: the circuit is compiled, a proving key is generated,
+# the program is built against that key, and on a local validator a deposit, a
+# proof, a withdrawal and a second withdrawal with the same receipt that must be
+# refused all run in order.
 #
-# Ce que ce badge prouve : la chaîne circuit → clé → programme → preuve est
-# cohérente, et le programme accepte une preuve honnête tout en refusant une
-# double dépense.
+# What this badge proves: the circuit, the proving key, the program and the
+# client agree, and the program accepts an honest proof while refusing a double
+# spend.
 #
-# Ce qu'il ne prouve pas : que la clé de vérification compilée ici est celle du
-# programme déployé sur mainnet. Celle-là vient de la cérémonie décrite dans
-# SECURITY.md, et elle se vérifie avec `node scripts/vkey.mjs` sur la zkey
-# publiée, pas ici.
+# What it does not prove: that the verifying key compiled here is the one in the
+# program deployed on mainnet. That one comes from the ceremony described in
+# CEREMONY.md, and it is checked against the published zkey, not here.
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Chaîne d'outils Solana
+      - name: Solana toolchain
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
@@ -47,36 +47,44 @@ jobs:
             target
           key: sbf-${{ hashFiles('Cargo.lock') }}
 
-      - name: Dépendances
+      - name: Dependencies
         run: |
           npm ci --no-audit --no-fund
           npm ci --no-audit --no-fund --prefix circuits
 
-      # Les clés de preuve ne sont pas dans le dépôt : le test les reconstruit
-      # depuis le circuit publié et une phase 1 publique. Elles doivent exister
-      # AVANT la compilation, parce que le programme embarque la clé de
-      # vérification produite ici.
-      - name: Circuit et clé de preuve
+      # Proving keys are not in the repository: the test rebuilds them from the
+      # published circuit, and they have to exist BEFORE the build because the
+      # program embeds the verifying key produced here.
+      #
+      # Nothing is downloaded. The public Hermez phase-one mirrors have returned
+      # 403 since 14 September 2026, and a pipeline that depends on a file hosted
+      # elsewhere breaks the day that elsewhere disappears. These keys are
+      # throwaway test keys; the production one comes from CEREMONY.md.
+      - name: Circuit and a throwaway proving key
+        working-directory: circuits
         run: |
-          curl -sSfL -o circuits/pot14_final.ptau \
-            https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_14.ptau
-          npx --yes circom circuits/withdraw.circom --r1cs --wasm -o circuits -l circuits/node_modules
-          npx --yes snarkjs groth16 setup circuits/withdraw.r1cs circuits/pot14_final.ptau circuits/withdraw_0000.zkey
-          echo "github actions entropy" | npx --yes snarkjs zkey contribute \
-            circuits/withdraw_0000.zkey circuits/withdraw_final.zkey --name="ci"
-          node scripts/vkey.mjs
+          npx --yes circom withdraw.circom --r1cs --wasm -l node_modules -o .
+          npx --yes snarkjs powersoftau new bn128 14 pot_0000.ptau -v
+          echo "github actions entropy" | npx --yes snarkjs powersoftau contribute \
+            pot_0000.ptau pot_0001.ptau --name="ci" -v
+          npx --yes snarkjs powersoftau prepare phase2 pot_0001.ptau pot_final.ptau -v
+          npx --yes snarkjs groth16 setup withdraw.r1cs pot_final.ptau withdraw_0000.zkey
+          echo "github actions entropy 2" | npx --yes snarkjs zkey contribute \
+            withdraw_0000.zkey withdraw_final.zkey --name="ci" -v
+          npx --yes snarkjs zkey export verificationkey withdraw_final.zkey verification_key.json
+          cd .. && node scripts/vkey.mjs && node scripts/zeros.mjs
 
-      - name: Compiler le programme
+      - name: Build the program
         run: cargo-build-sbf --manifest-path programs/keephost-pool/Cargo.toml
 
-      # Le programme est chargé à son adresse déclarée sans sa clé privée :
-      # `--bpf-program` pose le binaire à l'adresse voulue, ce qui suffit pour
-      # un test (personne n'a besoin de pouvoir le remplacer).
-      - name: Validateur local
+      # The program is loaded at its declared address without its private key:
+      # `--bpf-program` places the binary where it belongs, which is all a test
+      # needs — nobody has to be able to replace it.
+      - name: Local validator
         run: |
           solana-test-validator --ledger .ledger --reset --quiet \
             --bpf-program "$PROGRAM_ID" target/deploy/keephost_pool.so &
           until solana cluster-version --url http://127.0.0.1:8899 >/dev/null 2>&1; do sleep 2; done
 
-      - name: Dépôt, preuve, retrait, double retrait refusé
+      - name: Deposit, proof, withdrawal, refused double spend
         run: node scripts/e2e.mjs --url http://127.0.0.1:8899

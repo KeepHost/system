@@ -1,38 +1,67 @@
-# KeepHost pool
+<h1 align="center">KeepHost</h1>
 
-[![test](https://github.com/KeepHost/system/actions/workflows/test.yml/badge.svg)](https://github.com/KeepHost/system/actions/workflows/test.yml)
+<p align="center">
+  A non-custodial shielded pool for SOL on Solana.<br>
+  Deposits land on an address with no private key. Withdrawals take a
+  zero-knowledge proof that you own one deposit — without saying which.
+</p>
 
-A non-custodial shielded pool for SOL on Solana. Deposits go to a program
-address with no private key. Withdrawals require a zero-knowledge proof that you
-know the secret behind one deposit in the tree — without saying which one.
+<p align="center">
+  <a href="https://github.com/KeepHost/system/actions/workflows/test.yml"><img alt="test" src="https://github.com/KeepHost/system/actions/workflows/test.yml/badge.svg"></a>
+  <img alt="solana mainnet" src="https://img.shields.io/badge/solana-mainnet-black">
+  <img alt="audit: none" src="https://img.shields.io/badge/audit-none-lightgrey">
+  <a href="LICENSE"><img alt="licence MIT" src="https://img.shields.io/badge/licence-MIT-black"></a>
+</p>
 
-## Status
+<p align="center">
+  <a href="https://keephost.fun">keephost.fun</a> ·
+  <a href="SECURITY.md">Security</a> ·
+  <a href="CEREMONY.md">Ceremony</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="https://x.com/KeepHostLedger">@KeepHostLedger</a>
+</p>
 
-Deployed on Solana mainnet on 23 September 2026. **Not audited, and the proving
-key comes from a ceremony run on a single machine** — read
-[SECURITY.md](SECURITY.md) before you send anything. It lists what the program
-guarantees, what it does not, and every step still missing.
+---
 
-```
-program    CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW
-pool 0.1   E5XcHUCSzn5AtEusBT4siweDYsKkPZ2Ba7iBXVp1SVMy
-pool 1     4T1wRmfivMCnC1XtU9p5Me5Z9DhEhZr8rLzSqwDMh2hV
-pool 10    8tYrcp7C6PC1CD4qDXS21LoZFtbS7eG8eRPCU7SYaA9E
-```
+> **Before you send anything.** The program is live and **not audited**, and its
+> proving key came from a ceremony run on a single machine — whoever held that
+> machine's randomness could forge a withdrawal. A public ceremony to replace it
+> is open ([CEREMONY.md](CEREMONY.md)), and the upgrade authority is
+> deliberately still held so that key *can* be replaced. Deposit only what you
+> can afford to lose.
 
-A pool address contains its creator in its seeds, so anyone can open a pool of
-the same size. Those four addresses are the ones this repository deployed; check
-against them, not against a link someone sends you.
+## Addresses
 
-The upgrade authority is **still held**, on purpose: the ceremony has to be
-redone from a public phase one, and that requires redeploying. It will be
-revoked once that is done — not before, because revoking now would freeze a
-proving key nobody should trust.
+Deployed to Solana mainnet on 23 September 2026.
 
-Before that deployment, the full path ran end to end against the exact binary
-that shipped: three deposits, a proof spending one of them without naming which,
-the payment landing on a fresh address, and the same receipt refused the second
-time.
+| | Address |
+|---|---|
+| Program | [`CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW`](https://solscan.io/account/CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW) |
+| Pool · 0.1 SOL | [`E5XcHUCSzn5AtEusBT4siweDYsKkPZ2Ba7iBXVp1SVMy`](https://solscan.io/account/E5XcHUCSzn5AtEusBT4siweDYsKkPZ2Ba7iBXVp1SVMy) |
+| Pool · 1 SOL | [`4T1wRmfivMCnC1XtU9p5Me5Z9DhEhZr8rLzSqwDMh2hV`](https://solscan.io/account/4T1wRmfivMCnC1XtU9p5Me5Z9DhEhZr8rLzSqwDMh2hV) |
+| Pool · 10 SOL | [`8tYrcp7C6PC1CD4qDXS21LoZFtbS7eG8eRPCU7SYaA9E`](https://solscan.io/account/8tYrcp7C6PC1CD4qDXS21LoZFtbS7eG8eRPCU7SYaA9E) |
+| Token | [`4c1XZRqFV6y8pAckHru5oiGPYUFw1eQ3kFotPLHrpump`](https://solscan.io/token/4c1XZRqFV6y8pAckHru5oiGPYUFw1eQ3kFotPLHrpump) |
+
+A pool address carries its creator inside its seeds, so **anyone can open a pool
+of the same size**. The three above are the ones this repository deployed: check
+against this table, not against a link someone sends you.
+
+The token paid the rent Solana charges to store the program. It is not a share,
+it pays nothing, and the pool takes no token to use.
+
+## It has been used
+
+The whole path ran on mainnet against the binary that shipped:
+
+| | Signature |
+|---|---|
+| Deposit · 0.1 SOL | [`2YVU31sk…D7Cn27g9`](https://solscan.io/tx/2YVU31skhcv6BPAjHojugqgUPuF4PpehrmpS1XvCnUiGJJC5mZoB7XgHjVQYyK1kEs9hU5y6ec5TkiW3D7Cn27g9) |
+| Withdrawal · nine slots later | [`WXLawCeX…GWA3aeEy`](https://solscan.io/tx/WXLawCeXKXV2DsjAeFhaYBGWzqBNz4gmmSYKpRxP9urSwtpGBazq7wDgtW55jsXdceHcYKRfbAaPBaVGWA3aeEy) |
+
+One address paid in; a different address, with no history and no funding, was
+paid out. The program verified that one leaf of the tree belonged to whoever
+asked, without learning which. The same receipt, presented a second time, was
+refused.
 
 ## How it works
 
