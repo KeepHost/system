@@ -9,7 +9,6 @@
 <p align="center">
   <a href="https://github.com/KeepHost/system/actions/workflows/test.yml"><img alt="test" src="https://github.com/KeepHost/system/actions/workflows/test.yml/badge.svg"></a>
   <img alt="solana mainnet" src="https://img.shields.io/badge/solana-mainnet-black">
-  <img alt="audit: none" src="https://img.shields.io/badge/audit-none-lightgrey">
   <a href="LICENSE"><img alt="licence MIT" src="https://img.shields.io/badge/licence-MIT-black"></a>
 </p>
 

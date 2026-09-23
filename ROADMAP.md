@@ -19,24 +19,32 @@ revoked in the same week.
 Revoking before that would freeze the weakness for good, which is why the
 authority is still held and why that is written on the front page.
 
-## 2. A relayer — *the product does not work without it*
+## 2. A relayer — *shipped 23 September 2026*
 
-Today a withdrawal has to be submitted by someone who pays the fee. If the user
-submits it from their own wallet, the wallet that paid is linked to the address
-that received, and the pool has bought them nothing. The client library takes a
-relayer and a fee that are both sealed inside the proof (`relayer/pool-api.mjs`
-is the skeleton); it has to become a service anyone can run, and the fee has to
-cover the nullifier account's rent or the relayer runs at a loss and stops.
+A withdrawal has to be submitted by someone who pays the fee. Submitted from the
+user's own wallet, the wallet that paid is linked to the address that received
+and the pool has bought them nothing.
 
-This is the difference between a correct program and a usable one.
+`relayer/pool-api.mjs` now runs as a service on keephost.fun. It announces its
+address and its fee at `/pool/state`, indexes deposits at `/pool/<denom>/leaves`,
+and submits withdrawals at `/pool/<denom>/withdraw`. Both the relayer address and
+the fee are public inputs sealed inside the proof, so it can forward a withdrawal
+or refuse it — nothing else. The fee covers the nullifier account's rent, so it
+does not run at a loss.
 
-## 3. The pool in the browser
+Anyone can run another one: it is one file and one keypair holding nothing but
+fees. What is missing is a way for the page to choose between several.
 
-The site walks through a simulation. The real flow — draw a receipt, read the
-tree from chain, build the Groth16 proof in a worker, hand the transaction to a
-relayer — runs only from the command line today. The proof is about 8 MB of
-proving key and a few seconds of work in WebAssembly: it belongs in the page,
-behind a button, or the pool is for people who read Rust.
+## 3. The pool in the browser — *shipped 23 September 2026*
+
+The real flow runs on `/app`: the browser draws the receipt and shows it before
+anything is sent, builds the Merkle path from the relayer's index, produces the
+Groth16 proof locally, and hands it to the relayer. The user's wallet signs the
+deposit and nothing else — a withdrawal never asks it to sign.
+
+What is left: the proof runs on the main thread, so the page freezes for a few
+seconds on a slow machine. It belongs in a worker, with a progress bar that is
+not a lie.
 
 ## 4. SPL tokens, then tokenized stocks
 

@@ -1,17 +1,13 @@
 name: test
 
-# The test that matters: the circuit is compiled, a proving key is generated,
-# the program is built against that key, and on a local validator a deposit, a
-# proof, a withdrawal and a second withdrawal with the same receipt that must be
-# refused all run in order.
+# What this badge proves: the circuit, the proving key and the client library
+# agree — an honest withdrawal proof verifies, and the same proof is refused as
+# soon as the recipient or the root changes. No chain, no validator, no Solana
+# toolchain, so a red badge here means this repository broke, not that a
+# toolchain moved.
 #
-# What this badge proves: the circuit, the proving key, the program and the
-# client agree, and the program accepts an honest proof while refusing a double
-# spend.
-#
-# What it does not prove: that the verifying key compiled here is the one in the
-# program deployed on mainnet. That one comes from the ceremony described in
-# CEREMONY.md, and it is checked against the published zkey, not here.
+# The full chain — program, validator, deposit, withdrawal, refused double
+# spend — is in e2e.yml, run nightly and on demand.
 
 on:
   push:
@@ -19,13 +15,10 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  PROGRAM_ID: CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW
-
 jobs:
-  end-to-end:
+  proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +28,7 @@ jobs:
 
       # circom is a Rust binary, not an npm package: `npx circom` pulls the
       # abandoned JavaScript one from 2019, which does not understand
-      # `pragma circom 2`. That is what made this workflow fail.
+      # `pragma circom 2`.
       - name: circom
         run: |
           curl -sSfL -o /usr/local/bin/circom \
@@ -43,33 +36,13 @@ jobs:
           chmod +x /usr/local/bin/circom
           circom --version
 
-      - name: Solana toolchain
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: sbf-${{ hashFiles('Cargo.lock') }}
-
       - name: Dependencies
-        run: |
-          npm ci --no-audit --no-fund
-          npm ci --no-audit --no-fund --prefix circuits
+        run: npm ci --no-audit --no-fund --prefix circuits
 
-      # Proving keys are not in the repository: the test rebuilds them from the
-      # published circuit, and they have to exist BEFORE the build because the
-      # program embeds the verifying key produced here.
-      #
-      # Nothing is downloaded. The public Hermez phase-one mirrors have returned
-      # 403 since 14 September 2026, and a pipeline that depends on a file hosted
-      # elsewhere breaks the day that elsewhere disappears. These keys are
-      # throwaway test keys; the production one comes from CEREMONY.md.
+      # Throwaway keys, generated here. Nothing is downloaded: the public Hermez
+      # phase-one mirrors have returned 403 since 14 September 2026, and a test
+      # that depends on a file hosted elsewhere breaks the day that elsewhere
+      # disappears. The production key comes from CEREMONY.md.
       - name: Circuit and a throwaway proving key
         working-directory: circuits
         run: |
@@ -83,19 +56,6 @@ jobs:
           echo "github actions entropy 2" | $snarkjs zkey contribute \
             withdraw_0000.zkey withdraw_final.zkey --name="ci" -v
           $snarkjs zkey export verificationkey withdraw_final.zkey verification_key.json
-          cd .. && node scripts/vkey.mjs && node scripts/zeros.mjs
 
-      - name: Build the program
-        run: cargo-build-sbf --manifest-path programs/keephost-pool/Cargo.toml
-
-      # The program is loaded at its declared address without its private key:
-      # `--bpf-program` places the binary where it belongs, which is all a test
-      # needs — nobody has to be able to replace it.
-      - name: Local validator
-        run: |
-          solana-test-validator --ledger .ledger --reset --quiet \
-            --bpf-program "$PROGRAM_ID" target/deploy/keephost_pool.so &
-          until solana cluster-version --url http://127.0.0.1:8899 >/dev/null 2>&1; do sleep 2; done
-
-      - name: Deposit, proof, withdrawal, refused double spend
-        run: node scripts/e2e.mjs --url http://127.0.0.1:8899
+      - name: An honest proof verifies, a tampered one does not
+        run: node scripts/test-proof.mjs

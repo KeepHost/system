@@ -1,0 +1,38 @@
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculating First Challenge Hash
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: tauG1
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: tauG2
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: alphaTauG1
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: betaTauG1
+[36;22m[DEBUG] [39;1msnarkJS[0m: Blank Contribution Hash:
+		786a02f7 42015903 c6c6fd85 2552d272
+		912f4740 e1584761 8a86e217 f71f5419
+		d25e1031 afee5853 13896444 934eb04b
+		903a685b 1448b755 d56f701a fe9be2ce
+[32;22m[INFO]  [39;1msnarkJS[0m: First Contribution Hash:
+		bc0bde79 80381fa6 42b20975 91dd83f1
+		ed15b003 e15c3552 0af32c95 eb519149
+		2a6f3175 215635cf c10e6098 e2c612d0
+		ca84f1a9 f90b5333 560c8af5 9b9209f4
+Enter a random text. (Entropy): [36;22m[DEBUG] [39;1msnarkJS[0m: Calculating First Challenge Hash
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: tauG1
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: tauG2
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: alphaTauG1
+[36;22m[DEBUG] [39;1msnarkJS[0m: Calculate Initial Hash: betaTauG1
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: tauG1: 0/32767
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: tauG1: 16384/32767
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: tauG2: 0/16384
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: tauG2: 8192/16384
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: alphaTauG1: 0/16384
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: betaTauG1: 0/16384
+[36;22m[DEBUG] [39;1msnarkJS[0m: processing: betaTauG2: 0/1
+[32;22m[INFO]  [39;1msnarkJS[0m: Contribution Response Hash imported: 
+		601b5743 1e0b3290 c6128657 e536b5bd
+		ba6a436b 54d90430 56d79f62 62525223
+		aa89fcf7 01d3d0f3 904f748b ad7aadf0
+		bdcf9678 f241925e 20abc92f 22dbb136
+[32;22m[INFO]  [39;1msnarkJS[0m: Next Challenge Hash: 
+		d7eae33b 3e42c11f 968b84f2 a7ef3999
+		5d06d7bd b475ac27 33355660 d778e8b7
+		6f1f1e47 5be75fd7 eed6793f 90777cab
+		bc7021d9 9e7aaa6f 74bbed35 6e31d5ba
+CEREMONY_STEP1_OK
