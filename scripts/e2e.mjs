@@ -16,12 +16,17 @@ import {
 } from "@solana/web3.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { newReceipt, proveWithdraw, bytes32, encodeReceipt, decodeReceipt } from "../client/pool.mjs";
+import { newReceipt, proveWithdraw, bytes32, encodeReceipt, decodeReceipt, leavesFromChain } from "../client/pool.mjs";
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap((a, i, all) => (a.startsWith("--") ? [[a.slice(2), all[i + 1] ?? true]] : [])),
 );
-const RPC_URL = args.url === "devnet" ? "https://api.devnet.solana.com" : args.url || "http://127.0.0.1:8899";
+const URLS = {
+  mainnet: "https://api.mainnet-beta.solana.com",
+  "mainnet-beta": "https://api.mainnet-beta.solana.com",
+  devnet: "https://api.devnet.solana.com",
+};
+const RPC_URL = URLS[args.url] || args.url || "http://127.0.0.1:8899";
 const PROGRAM_ID = new PublicKey(
   readFileSync(new URL("../Anchor.toml", import.meta.url), "utf8").match(/keephost_pool = "([^"]+)"/)[1],
 );
@@ -152,9 +157,15 @@ async function main() {
     const sig = await deposit(r);
     log(`deposit ${i} · commitment ${bytes32(r.commitment).slice(0, 4).join("")}… · ${sig}`);
   }
-  const leaves = receipts.map((r) => r.commitment);
+  // Les feuilles se relisent sur la chaîne, jamais depuis ce qu'on croit avoir
+  // déposé : le pool peut déjà en contenir d'autres, et la racine d'un arbre
+  // incomplet n'existe pour personne.
+  const leaves = await leavesFromChain(conn, poolPda, PROGRAM_ID);
+  log(`arbre : ${leaves.length} feuilles lues sur la chaîne`);
 
-  const text = encodeReceipt(receipts[1], DENOM, poolPda.toBase58(), 1);
+  const mine = leaves.indexOf(receipts[1].commitment);
+  if (mine < 0) throw new Error("le dépôt n'a pas été retrouvé dans l'arbre relu sur la chaîne");
+  const text = encodeReceipt(receipts[1], DENOM, poolPda.toBase58(), mine);
   log("receipt:", text.slice(0, 28) + "…");
   const reread = await decodeReceipt(text);
   if (reread.commitment !== receipts[1].commitment) throw new Error("the receipt does not read back");
@@ -162,7 +173,7 @@ async function main() {
   const recipient = Keypair.generate().publicKey;
   const before = await conn.getBalance(recipient);
   const fee = 0;
-  const sig = await withdraw({ receipt: reread, leaves, index: 1, recipient, fee });
+  const sig = await withdraw({ receipt: reread, leaves, index: mine, recipient, fee });
   const after = await conn.getBalance(recipient);
   log(`withdrawal to ${recipient.toBase58()} · ${sig}`);
   log(`received ${(after - before) / LAMPORTS_PER_SOL} SOL (expected ${Number(DENOM - BigInt(fee)) / LAMPORTS_PER_SOL})`);
@@ -170,7 +181,7 @@ async function main() {
 
   let doubleSpend = "refused";
   try {
-    await withdraw({ receipt: reread, leaves, index: 1, recipient, fee });
+    await withdraw({ receipt: reread, leaves, index: mine, recipient, fee });
     doubleSpend = "ACCEPTED — FLAW";
   } catch {}
   log("double withdrawal:", doubleSpend);
