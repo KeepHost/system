@@ -37,7 +37,13 @@ const u64 = (v) => {
   b.writeBigUInt64LE(BigInt(v));
   return b;
 };
-const poolPda = (denom) => PublicKey.findProgramAddressSync([Buffer.from("pool"), u64(denom)], PROGRAM_ID)[0];
+// Le créateur entre dans les seeds du pool : sans lui, l'adresse calculée ici
+// n'est celle de personne. C'est ce qui rend les pools officiels identifiables —
+// n'importe qui peut ouvrir un pool de la même taille, seul celui de ce créateur
+// est le nôtre, et il est écrit sur la page d'accueil.
+const CREATOR = new PublicKey(process.env.POOL_CREATOR || "8dsM4x5xZKUGDGgCJCX4hLro5hnbnspW92jH14N96otD");
+const poolPda = (denom) =>
+  PublicKey.findProgramAddressSync([Buffer.from("pool"), CREATOR.toBuffer(), u64(denom)], PROGRAM_ID)[0];
 const vaultPda = (pool) => PublicKey.findProgramAddressSync([Buffer.from("vault"), pool.toBuffer()], PROGRAM_ID)[0];
 const nullifierPda = (pool, hash) => PublicKey.findProgramAddressSync([Buffer.from("nullifier"), pool.toBuffer(), hash], PROGRAM_ID)[0];
 
@@ -164,6 +170,12 @@ createServer(async (req, res) => {
     if (req.method === "POST" && withdrawMatch) {
       if (!relayer) return send(res, 503, { error: "This relayer has no key configured." });
       const body = await readJson(req);
+      // La commission est scellée dans la preuve : si le client en a utilisé une
+      // autre, la preuve ne vérifiera pas et c'est le relayer qui aurait payé
+      // les frais de la transaction refusée. On le dit avant, pas après.
+      if (body.fee !== undefined && BigInt(body.fee) !== FEE) {
+        return send(res, 409, { error: "fee mismatch", expected: FEE.toString() });
+      }
       const denom = withdrawMatch[1];
       const pool = poolPda(denom);
       const recipient = new PublicKey(body.recipient);
@@ -190,8 +202,19 @@ createServer(async (req, res) => {
         data,
       });
       const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 900_000 }), ix);
+      // Simulation d'abord : une preuve invalide coûterait les frais au relayer,
+      // et n'importe qui peut en envoyer. Ici, elle ne coûte rien à personne.
+      tx.feePayer = relayer.publicKey;
+      tx.recentBlockhash = (await conn.getLatestBlockhash("confirmed")).blockhash;
+      const sim = await conn.simulateTransaction(tx);
+      if (sim.value.err) {
+        return send(res, 422, {
+          error: "the program refused this withdrawal",
+          logs: (sim.value.logs ?? []).filter((l) => l.includes("Error") || l.includes("AnchorError")).slice(0, 3),
+        });
+      }
       const signature = await sendAndConfirmTransaction(conn, tx, [relayer], { commitment: "confirmed" });
-      return send(res, 200, { ok: true, signature });
+      return send(res, 200, { ok: true, signature, fee: FEE.toString() });
     }
 
     send(res, 404, { error: "not found" });
