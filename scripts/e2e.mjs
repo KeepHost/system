@@ -15,7 +15,7 @@ import {
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { newReceipt, proveWithdraw, bytes32, encodeReceipt, decodeReceipt, leavesFromChain } from "../client/pool.mjs";
 
 const args = Object.fromEntries(
@@ -148,11 +148,31 @@ async function withdraw({ receipt, leaves, index, recipient, fee }) {
 async function main() {
   log("network:", RPC_URL);
   log("program:", PROGRAM_ID.toBase58());
-  await ensureFunds(payer.publicKey, Number(DENOM * 3n) / LAMPORTS_PER_SOL + 0.05);
+  // Combien de dépôts ce test fait. Sur un réseau où le SOL a de la valeur, un
+  // seul suffit : la foule est déjà dans l'arbre, et chaque dépôt de plus est
+  // de l'argent immobilisé si quelque chose échoue ensuite.
+  const COUNT = Number(args.deposits || (RPC_URL.includes("127.0.0.1") ? 3 : 1));
+  await ensureFunds(payer.publicKey, (Number(DENOM) * COUNT) / LAMPORTS_PER_SOL + 0.05);
   await initializeIfNeeded();
 
-  // Three deposits: the crowd is what hides the withdrawal.
-  const receipts = [await newReceipt(), await newReceipt(), await newReceipt()];
+  const receipts = [];
+  for (let i = 0; i < COUNT; i++) receipts.push(await newReceipt());
+
+  // Les reçus sont écrits AVANT le premier dépôt. Le 23/09/2026, un test a
+  // déposé 0,6 SOL sur mainnet, échoué au retrait, et les reçus n'existaient
+  // que dans la mémoire du processus : l'argent est resté dans le pool pour
+  // toujours. Un reçu perdu est un dépôt perdu, il n'y a pas de rattrapage.
+  const file = `receipts-${Date.now()}.json`;
+  writeFileSync(
+    file,
+    JSON.stringify(
+      receipts.map((r) => ({ nullifier: r.nullifier.toString(), secret: r.secret.toString(), commitment: r.commitment.toString() })),
+      null,
+      2,
+    ),
+  );
+  log(`reçus écrits dans ${file} — à garder tant que ces dépôts existent`);
+
   for (const [i, r] of receipts.entries()) {
     const sig = await deposit(r);
     log(`deposit ${i} · commitment ${bytes32(r.commitment).slice(0, 4).join("")}… · ${sig}`);
@@ -163,12 +183,13 @@ async function main() {
   const leaves = await leavesFromChain(conn, poolPda, PROGRAM_ID);
   log(`arbre : ${leaves.length} feuilles lues sur la chaîne`);
 
-  const mine = leaves.indexOf(receipts[1].commitment);
+  const spend = receipts[Math.min(1, receipts.length - 1)];
+  const mine = leaves.indexOf(spend.commitment);
   if (mine < 0) throw new Error("le dépôt n'a pas été retrouvé dans l'arbre relu sur la chaîne");
-  const text = encodeReceipt(receipts[1], DENOM, poolPda.toBase58(), mine);
+  const text = encodeReceipt(spend, DENOM, poolPda.toBase58(), mine);
   log("receipt:", text.slice(0, 28) + "…");
   const reread = await decodeReceipt(text);
-  if (reread.commitment !== receipts[1].commitment) throw new Error("the receipt does not read back");
+  if (reread.commitment !== spend.commitment) throw new Error("the receipt does not read back");
 
   const recipient = Keypair.generate().publicKey;
   const before = await conn.getBalance(recipient);
