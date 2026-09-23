@@ -1,0 +1,82 @@
+name: test
+
+# Le test qui compte : circuit compilé, clé de preuve générée, programme
+# construit avec cette clé, puis sur un validateur local un dépôt, une preuve,
+# un retrait, et un second retrait avec le même reçu qui doit être refusé.
+#
+# Ce que ce badge prouve : la chaîne circuit → clé → programme → preuve est
+# cohérente, et le programme accepte une preuve honnête tout en refusant une
+# double dépense.
+#
+# Ce qu'il ne prouve pas : que la clé de vérification compilée ici est celle du
+# programme déployé sur mainnet. Celle-là vient de la cérémonie décrite dans
+# SECURITY.md, et elle se vérifie avec `node scripts/vkey.mjs` sur la zkey
+# publiée, pas ici.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PROGRAM_ID: CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW
+
+jobs:
+  end-to-end:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Chaîne d'outils Solana
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: sbf-${{ hashFiles('Cargo.lock') }}
+
+      - name: Dépendances
+        run: |
+          npm ci --no-audit --no-fund
+          npm ci --no-audit --no-fund --prefix circuits
+
+      # Les clés de preuve ne sont pas dans le dépôt : le test les reconstruit
+      # depuis le circuit publié et une phase 1 publique. Elles doivent exister
+      # AVANT la compilation, parce que le programme embarque la clé de
+      # vérification produite ici.
+      - name: Circuit et clé de preuve
+        run: |
+          curl -sSfL -o circuits/pot14_final.ptau \
+            https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_14.ptau
+          npx --yes circom circuits/withdraw.circom --r1cs --wasm -o circuits -l circuits/node_modules
+          npx --yes snarkjs groth16 setup circuits/withdraw.r1cs circuits/pot14_final.ptau circuits/withdraw_0000.zkey
+          echo "github actions entropy" | npx --yes snarkjs zkey contribute \
+            circuits/withdraw_0000.zkey circuits/withdraw_final.zkey --name="ci"
+          node scripts/vkey.mjs
+
+      - name: Compiler le programme
+        run: cargo-build-sbf --manifest-path programs/keephost-pool/Cargo.toml
+
+      # Le programme est chargé à son adresse déclarée sans sa clé privée :
+      # `--bpf-program` pose le binaire à l'adresse voulue, ce qui suffit pour
+      # un test (personne n'a besoin de pouvoir le remplacer).
+      - name: Validateur local
+        run: |
+          solana-test-validator --ledger .ledger --reset --quiet \
+            --bpf-program "$PROGRAM_ID" target/deploy/keephost_pool.so &
+          until solana cluster-version --url http://127.0.0.1:8899 >/dev/null 2>&1; do sleep 2; done
+
+      - name: Dépôt, preuve, retrait, double retrait refusé
+        run: node scripts/e2e.mjs --url http://127.0.0.1:8899
