@@ -23,24 +23,36 @@ run by hundreds of participants. Its official mirrors have been returning 403
 since 14 September 2026 ([snarkjs#636](https://github.com/iden3/snarkjs/issues/636)),
 so KeepHost runs its own phase one in the open instead.
 
-Phase one started on 23 September 2026. First contribution hash:
+Phase one started on 23 September 2026 and is **still open**. Contributions so
+far, each one chaining onto the last:
 
-```
-bc0bde79 80381fa6 42b20975 91dd83f1
-ed15b003 e15c3552 0af32c95 eb519149
-2a6f3175 215635cf c10e6098 e2c612d0
-ca84f1a9 f90b5333 560c8af5 9b9209f4
+| # | Contributor | Next challenge hash |
+|---|---|---|
+| 1 | keephost server (opening) | `d7eae33b 3e42c11f 968b84f2 a7ef3999 …` |
+| 2 | Kaya | `81f4a8fc ebd36637 be551d5f e9b97713 …` |
+
+Verify that chain yourself — it takes one command and no trust:
+
+```bash
+curl -L -o pot.ptau https://keephost.fun/ceremony/pot14_0002.ptau
+npx snarkjs powersoftau verify pot.ptau
 ```
 
-The current file is published at
-<https://keephost.fun/ceremony/pot14_0001.ptau>.
+**Both contributions so far come from this project.** That is not enough, and
+saying otherwise would defeat the purpose: a stranger cannot check that we threw
+our randomness away. The ceremony becomes worth something the moment somebody
+with no stake in KeepHost contributes and destroys theirs. Until then this file
+stays open and the reserve stays on the front page.
+
+The current file is <https://keephost.fun/ceremony/pot14_0002.ptau>
+(sha256 `3b3655b12d98e13f082681b1975a21d9…`).
 
 ## How to contribute (about two minutes)
 
 You need Node. Nothing else, and nothing to install permanently.
 
 ```bash
-curl -L -o pot_in.ptau https://keephost.fun/ceremony/pot14_0001.ptau
+curl -L -o pot_in.ptau https://keephost.fun/ceremony/pot14_0002.ptau
 npx snarkjs powersoftau verify pot_in.ptau
 npx snarkjs powersoftau contribute pot_in.ptau pot_out.ptau --name="<your name>" -v
 ```
