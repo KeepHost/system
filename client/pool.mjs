@@ -199,13 +199,31 @@ export async function leavesFromChain(connection, poolPda, programId) {
       maxSupportedTransactionVersion: 0,
       commitment: "confirmed",
     });
+    // An event discriminator is public, and so is a pool address: anyone can
+    // emit a log that looks exactly like a deposit, from their own program, in
+    // a transaction that merely mentions this pool. Folding that into the tree
+    // produces a root the program never stored, so every later proof is
+    // rejected with UnknownRoot — a few lamports would lock a stranger's
+    // deposit for good. Only lines emitted between our program's own invoke
+    // and its return are counted.
+    let depth = 0;
     for (const line of tx?.meta?.logMessages ?? []) {
-      if (!line.startsWith("Program data: ")) continue;
-      const raw = Buffer.from(line.slice("Program data: ".length), "base64");
-      if (raw.length < 8 + 32 + 32 + 4 + 32 + 8 || !raw.subarray(0, 8).equals(disc)) continue;
-      if (!raw.subarray(8, 40).equals(Buffer.from(poolBytes))) continue;
-      const commitment = BigInt("0x" + raw.subarray(40, 72).toString("hex"));
-      found.set(raw.readUInt32LE(72), commitment);
+      if (line.startsWith(`Program ${programId.toBase58()} invoke`)) depth++;
+      else if (
+        line.startsWith(`Program ${programId.toBase58()} success`) ||
+        line.startsWith(`Program ${programId.toBase58()} failed`)
+      ) {
+        depth = Math.max(0, depth - 1);
+      } else if (depth > 0 && line.startsWith("Program data: ")) {
+        const raw = Buffer.from(line.slice("Program data: ".length), "base64");
+        if (raw.length < 8 + 32 + 32 + 4 + 32 + 8 || !raw.subarray(0, 8).equals(disc)) continue;
+        if (!raw.subarray(8, 40).equals(Buffer.from(poolBytes))) continue;
+        const leafIndex = raw.readUInt32LE(72);
+        // The tree has 2^20 leaves: anything above that is not ours to believe,
+        // and a single absurd index would make the reconstruction below fail.
+        if (leafIndex >= 1 << LEVELS) continue;
+        found.set(leafIndex, BigInt("0x" + raw.subarray(40, 72).toString("hex")));
+      }
     }
   }
 

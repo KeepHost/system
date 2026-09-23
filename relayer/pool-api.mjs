@@ -93,6 +93,12 @@ async function refresh(denom) {
       else if (depth > 0 && line.startsWith("Program data: ")) {
         const raw = Buffer.from(line.slice("Program data: ".length), "base64");
         if (raw.length < 76 || !raw.subarray(0, 8).equals(DEPOSITED)) continue;
+        // Opening a pool is permissionless, so the same program emits genuine
+        // deposit events for pools that are not this one. A transaction that
+        // touches both would file a foreign leaf into this denomination's tree
+        // and lock every user of this index out of their funds — and it would
+        // survive a restart, because the index is written to disk.
+        if (!raw.subarray(8, 40).equals(pool.toBuffer())) continue;
         const commitment = raw.subarray(40, 72).toString("hex");
         const leafIndex = raw.readUInt32LE(72);
         if (leafIndex >= 1 << 20) continue;
