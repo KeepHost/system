@@ -50,6 +50,11 @@ const log = (...a) => console.log(...a);
 async function ensureFunds(pubkey, sol) {
   const balance = await conn.getBalance(pubkey);
   if (balance >= sol * LAMPORTS_PER_SOL) return;
+  // Pas de faucet ailleurs qu'en local : sur un vrai réseau, on dit ce qui
+  // manque et on s'arrête plutôt que de lancer une requête qui échouera.
+  if (!RPC_URL.includes("127.0.0.1") && !RPC_URL.includes("localhost")) {
+    throw new Error(`fonds insuffisants : ${pubkey.toBase58()} a ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL, il en faut ${sol}`);
+  }
   log(`airdrop ${sol} SOL → ${pubkey.toBase58()}`);
   const sig = await conn.requestAirdrop(pubkey, sol * LAMPORTS_PER_SOL);
   await conn.confirmTransaction(sig, "confirmed");
@@ -138,7 +143,7 @@ async function withdraw({ receipt, leaves, index, recipient, fee }) {
 async function main() {
   log("network:", RPC_URL);
   log("program:", PROGRAM_ID.toBase58());
-  await ensureFunds(payer.publicKey, 2);
+  await ensureFunds(payer.publicKey, Number(DENOM * 3n) / LAMPORTS_PER_SOL + 0.05);
   await initializeIfNeeded();
 
   // Three deposits: the crowd is what hides the withdrawal.

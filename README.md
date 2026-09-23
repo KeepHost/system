@@ -1,5 +1,7 @@
 # KeepHost pool
 
+[![test](https://github.com/KeepHost/system/actions/workflows/test.yml/badge.svg)](https://github.com/KeepHost/system/actions/workflows/test.yml)
+
 A non-custodial shielded pool for SOL on Solana. Deposits go to a program
 address with no private key. Withdrawals require a zero-knowledge proof that you
 know the secret behind one deposit in the tree — without saying which one.
