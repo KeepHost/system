@@ -166,3 +166,56 @@ function concat(...arrays) {
   }
   return out;
 }
+
+/**
+ * The leaves of a pool's tree, read back from the chain.
+ *
+ * A client that only knows its own deposits builds a tree the program has never
+ * seen: its root is not in the pool's root history and the withdrawal is
+ * rejected with UnknownRoot. That is not theory — it happened on mainnet on
+ * 23 September 2026, on a pool that already held three deposits from an earlier
+ * run. Anything that builds a proof must call this first.
+ *
+ * Deposits are read from the program's own `Deposited` events, in leaf order.
+ */
+export async function leavesFromChain(connection, poolPda, programId) {
+  const { createHash } = await import("node:crypto");
+  const disc = createHash("sha256").update("event:Deposited").digest().subarray(0, 8);
+  const poolBytes = poolPda.toBytes();
+
+  const signatures = [];
+  for (let before; ; ) {
+    const page = await connection.getSignaturesForAddress(poolPda, { limit: 1000, before });
+    signatures.push(...page);
+    if (page.length < 1000) break;
+    before = page[page.length - 1].signature;
+  }
+
+  const found = new Map(); // leaf_index -> commitment
+  // Oldest first: the tree is built in the order the chain accepted it.
+  for (const { signature, err } of signatures.reverse()) {
+    if (err) continue;
+    const tx = await connection.getTransaction(signature, {
+      maxSupportedTransactionVersion: 0,
+      commitment: "confirmed",
+    });
+    for (const line of tx?.meta?.logMessages ?? []) {
+      if (!line.startsWith("Program data: ")) continue;
+      const raw = Buffer.from(line.slice("Program data: ".length), "base64");
+      if (raw.length < 8 + 32 + 32 + 4 + 32 + 8 || !raw.subarray(0, 8).equals(disc)) continue;
+      if (!raw.subarray(8, 40).equals(Buffer.from(poolBytes))) continue;
+      const commitment = BigInt("0x" + raw.subarray(40, 72).toString("hex"));
+      found.set(raw.readUInt32LE(72), commitment);
+    }
+  }
+
+  const leaves = [];
+  for (let i = 0; i < found.size; i++) {
+    const leaf = found.get(i);
+    // A hole means a deposit was missed: a tree built on it would be wrong, and
+    // a wrong tree means a proof that never verifies. Better to stop here.
+    if (leaf === undefined) throw new Error(`missing deposit at leaf ${i}: the tree cannot be rebuilt`);
+    leaves.push(leaf);
+  }
+  return leaves;
+}
