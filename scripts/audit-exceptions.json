@@ -1,0 +1,25 @@
+{
+  "comment": [
+    "Advisories this repository knowingly carries, with the reason. Anything not",
+    "listed here fails scripts/audit.mjs. An entry that no longer matches any",
+    "advisory also fails it: the fix landed, so the exception has to go.",
+    "Severity is recorded as npm reports it, never lowered to pass."
+  ],
+  "exceptions": [
+    {
+      "package": "elliptic",
+      "title": "Elliptic Uses a Cryptographic Primitive with a Risky Implementation",
+      "severity": "low",
+      "workspace": "circuits",
+      "why": [
+        "No released version fixes it: the advisory covers <=6.6.1, and 6.6.1 is",
+        "the newest published version. There is nothing to upgrade to.",
+        "It arrives as circomlibjs -> ethers -> elliptic. circomlibjs is used here",
+        "for one thing, the Poseidon hash, and its Ethereum helpers are never",
+        "called, so elliptic is installed but never runs.",
+        "It is a build-time dependency of the circuit workspace: not in the",
+        "program, not in the relayer, not shipped to a browser."
+      ]
+    }
+  ]
+}

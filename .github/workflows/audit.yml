@@ -1,0 +1,57 @@
+name: audit
+
+# The dependency audit, with its exceptions written down.
+#
+# What this badge proves: every advisory npm knows about in this repository's
+# dependencies is either fixed or named in scripts/audit-exceptions.json with the
+# reason it cannot be. Nothing is silenced by lowering a severity threshold.
+#
+# What it does not prove: that the code is secure. It is a check on what we
+# install, not on what we wrote — and it says nothing about the program, the
+# circuit or the ceremony. The external audit that would say something about
+# those is item 6 of ROADMAP.md, and it has not happened.
+#
+# This badge can go red without anyone touching the code: a new advisory against
+# a dependency is exactly the kind of news a repository like this one should
+# receive loudly rather than discover during an incident. When it does, the fix is
+# an upgrade or an override — and if neither exists, an entry in the exceptions
+# file that says so out loud.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "circuits/package.json"
+      - "circuits/package-lock.json"
+      - "scripts/audit.mjs"
+      - "scripts/audit-exceptions.json"
+      - ".github/workflows/audit.yml"
+  pull_request:
+  schedule:
+    # Lundi matin : une nouvelle faille connue ne doit pas attendre le prochain
+    # commit pour être vue.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # `npm ci` rather than `install`: the audit has to describe the tree the
+      # lockfiles pin, not a tree npm resolved freshly this morning.
+      - name: Dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm ci --no-audit --no-fund --prefix circuits
+
+      - name: Every advisory is fixed or written down
+        run: node scripts/audit.mjs

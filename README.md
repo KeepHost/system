@@ -8,7 +8,10 @@
 
 <p align="center">
   <a href="https://github.com/KeepHost/system/actions/workflows/test.yml"><img alt="test" src="https://github.com/KeepHost/system/actions/workflows/test.yml/badge.svg"></a>
-  <img alt="solana mainnet" src="https://img.shields.io/badge/solana-mainnet-black">
+  <a href="https://github.com/KeepHost/system/actions/workflows/audit.yml"><img alt="audit" src="https://github.com/KeepHost/system/actions/workflows/audit.yml/badge.svg"></a>
+  <a href="https://solscan.io/account/CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW"><img alt="mainnet: live" src="https://img.shields.io/badge/mainnet-live-brightgreen"></a>
+  <a href="https://solscan.io/tx/WXLawCeXKXV2DsjAeFhaYBGWzqBNz4gmmSYKpRxP9urSwtpGBazq7wDgtW55jsXdceHcYKRfbAaPBaVGWA3aeEy"><img alt="withdrawal: verified on chain" src="https://img.shields.io/badge/withdrawal-verified%20on%20chain-brightgreen"></a>
+  <a href="CEREMONY.md"><img alt="ceremony: open" src="https://img.shields.io/badge/ceremony-open-blue"></a>
   <a href="LICENSE"><img alt="licence MIT" src="https://img.shields.io/badge/licence-MIT-black"></a>
 </p>
 

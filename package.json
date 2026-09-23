@@ -5,5 +5,8 @@
   "description": "KeepHost non-custodial pool: Solana program, proof circuit, client, relayer",
   "dependencies": {
     "@solana/web3.js": "^1.99.0"
+  },
+  "overrides": {
+    "jayson": "^5.0.0"
   }
 }
