@@ -25,12 +25,13 @@
 
 ---
 
-> **Before you send anything.** The program is live and **not audited**, and its
-> proving key came from a ceremony run on a single machine — whoever held that
-> machine's randomness could forge a withdrawal. A public ceremony to replace it
-> is open ([CEREMONY.md](CEREMONY.md)), and the upgrade authority is
-> deliberately still held so that key *can* be replaced. Deposit only what you
-> can afford to lose.
+> **Where this stands.** The program is live, **not audited**, and its proving
+> key came from a ceremony run on a single machine — whoever held that machine's
+> randomness could forge a withdrawal. The public ceremony that replaces it is
+> [open to anyone](CEREMONY.md), and until the new key ships the upgrade
+> authority is deliberately kept so it *can* ship. That authority lives on an
+> offline wallet, not on the server: taking the machine no longer means taking
+> the program.
 
 ## Addresses
 

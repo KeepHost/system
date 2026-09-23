@@ -31,10 +31,14 @@ here contradicts the website, this file is right.
    running a phase two with independent contributors, and redeploying. The
    security then holds as soon as **one** participant was honest and destroyed
    their randomness.
-3. **The upgrade authority still exists.** Whoever holds it can replace the code
-   and therefore bypass everything else. It is held deliberately, because fixing
-   point 2 requires a redeploy; it will be revoked once that is done. The current
-   state is verifiable: `solana program show <PROGRAM_ID>`.
+3. **The upgrade authority still exists**, and whoever holds it can replace the
+   code and therefore bypass everything else. It is held deliberately, because
+   fixing point 2 requires a redeploy, and it will be revoked once that is done.
+   Since 23 September 2026 it is **no longer held by a key on the server**: it
+   sits on `5h11Ec9feUdgUyci1Bgeh4DJqA6MVebRhgr6Lr4F85yt`, a wallet that never
+   touches the machine serving this site — so taking the server no longer means
+   taking the program. Check it yourself with
+   `solana program show CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW`.
 4. **Privacy is not absolute.** It comes from the size of the crowd and from your
    own habits:
    - a nearly empty pool hides nearly nothing;
