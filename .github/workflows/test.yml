@@ -33,6 +33,16 @@ jobs:
         with:
           node-version: "22"
 
+      # circom is a Rust binary, not an npm package: `npx circom` pulls the
+      # abandoned JavaScript one from 2019, which does not understand
+      # `pragma circom 2`. That is what made this workflow fail.
+      - name: circom
+        run: |
+          curl -sSfL -o /usr/local/bin/circom \
+            https://github.com/iden3/circom/releases/latest/download/circom-linux-amd64
+          chmod +x /usr/local/bin/circom
+          circom --version
+
       - name: Solana toolchain
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
@@ -63,15 +73,16 @@ jobs:
       - name: Circuit and a throwaway proving key
         working-directory: circuits
         run: |
-          npx --yes circom withdraw.circom --r1cs --wasm -l node_modules -o .
-          npx --yes snarkjs powersoftau new bn128 14 pot_0000.ptau -v
-          echo "github actions entropy" | npx --yes snarkjs powersoftau contribute \
+          snarkjs=node_modules/.bin/snarkjs
+          circom withdraw.circom --r1cs --wasm -l node_modules -o .
+          $snarkjs powersoftau new bn128 14 pot_0000.ptau -v
+          echo "github actions entropy" | $snarkjs powersoftau contribute \
             pot_0000.ptau pot_0001.ptau --name="ci" -v
-          npx --yes snarkjs powersoftau prepare phase2 pot_0001.ptau pot_final.ptau -v
-          npx --yes snarkjs groth16 setup withdraw.r1cs pot_final.ptau withdraw_0000.zkey
-          echo "github actions entropy 2" | npx --yes snarkjs zkey contribute \
+          $snarkjs powersoftau prepare phase2 pot_0001.ptau pot_final.ptau -v
+          $snarkjs groth16 setup withdraw.r1cs pot_final.ptau withdraw_0000.zkey
+          echo "github actions entropy 2" | $snarkjs zkey contribute \
             withdraw_0000.zkey withdraw_final.zkey --name="ci" -v
-          npx --yes snarkjs zkey export verificationkey withdraw_final.zkey verification_key.json
+          $snarkjs zkey export verificationkey withdraw_final.zkey verification_key.json
           cd .. && node scripts/vkey.mjs && node scripts/zeros.mjs
 
       - name: Build the program
