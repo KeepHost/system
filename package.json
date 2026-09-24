@@ -4,6 +4,7 @@
   "type": "module",
   "description": "KeepHost non-custodial pool: Solana program, proof circuit, client, relayer",
   "dependencies": {
+    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.99.0"
   },
   "overrides": {

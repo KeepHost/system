@@ -162,6 +162,78 @@ pub mod keephost_pool {
         Ok(())
     }
 
+    /// Opens a pool for one SPL token at one fixed amount. The creator is part
+    /// of the seeds, so nobody can take a denomination hostage, and the vault is
+    /// a token account owned by a PDA — an address with no private key.
+    pub fn initialize_token_pool(ctx: Context<InitializeTokenPool>, denomination: u64) -> Result<()> {
+        require!(denomination > 0, PoolError::BadDenomination);
+        let pool = &mut ctx.accounts.pool.load_init()?;
+        pool.creator = ctx.accounts.creator.key();
+        pool.mint = ctx.accounts.mint.key();
+        pool.denomination = denomination;
+        pool.deposits = 0;
+        pool.next_index = 0;
+        pool.bump = ctx.bumps.pool;
+        // The bump stored is the one of the PDA that OWNS the vault, not of the
+        // token account: it is the authority PDA this program signs with.
+        pool.vault_bump = ctx.bumps.vault_authority;
+        pool.paused = 0;
+        pool.current_root_index = 0;
+        pool.filled_subtrees = ZEROS[..LEVELS].try_into().unwrap();
+        pool.roots = [ZEROS[LEVELS]; ROOT_HISTORY];
+
+        emit!(TokenPoolOpened {
+            pool: ctx.accounts.pool.key(),
+            mint: pool.mint,
+            denomination,
+        });
+        Ok(())
+    }
+
+    /// Deposits exactly the denomination of the pool's token and writes the
+    /// commitment into the tree. The chain sees the amount and the depositor,
+    /// as it does for SOL; it never sees which withdrawal they will make.
+    pub fn deposit_token(ctx: Context<DepositToken>, commitment: [u8; 32]) -> Result<()> {
+        let denomination = {
+            let pool = ctx.accounts.pool.load()?;
+            require!(pool.paused == 0, PoolError::Paused);
+            require!(is_field_element(&commitment), PoolError::NotFieldElement);
+            require!(commitment != [0u8; 32], PoolError::NotFieldElement);
+            require!((pool.next_index as usize) < (1usize << LEVELS), PoolError::TreeFull);
+            pool.denomination
+        };
+
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.from.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                    authority: ctx.accounts.depositor.to_account_info(),
+                },
+            ),
+            denomination,
+        )?;
+
+        let pool = &mut ctx.accounts.pool.load_mut()?;
+        let leaf_index = pool.next_index;
+        let root = append_leaf(&mut pool.filled_subtrees, leaf_index, commitment)?;
+        pool.next_index = leaf_index + 1;
+        pool.deposits = pool.deposits.saturating_add(1);
+        let slot = (pool.current_root_index as usize + 1) % ROOT_HISTORY;
+        pool.current_root_index = slot as u8;
+        pool.roots[slot] = root;
+
+        emit!(Deposited {
+            pool: ctx.accounts.pool.key(),
+            commitment,
+            leaf_index,
+            root,
+            at: Clock::get()?.unix_timestamp,
+        });
+        Ok(())
+    }
+
     /// Burns KEEPHOST tokens and mints a key: from then on, this wallet pays no
     /// deposit fee, for good. The tokens are destroyed by the token program —
     /// they do not come to us, and nothing here can give them back.
@@ -283,6 +355,105 @@ pub mod keephost_pool {
     }
 
     /// Stops or resumes new deposits. Withdrawals stay possible while paused.
+    /// Withdraws the pool's token to `recipient`, on the same proof as a SOL
+    /// withdrawal: the recipient, the relayer, the fee and the pool are all
+    /// public inputs, so a relayer can forward this or refuse it, nothing else.
+    ///
+    /// `recipient` and `relayer` here are token accounts, and the proof binds
+    /// those addresses — paying a different account invalidates it.
+    pub fn withdraw_token(
+        ctx: Context<WithdrawToken>,
+        proof_a: [u8; 64],
+        proof_b: [u8; 128],
+        proof_c: [u8; 64],
+        root: [u8; 32],
+        nullifier_hash: [u8; 32],
+        fee: u64,
+    ) -> Result<()> {
+        let pool_key = ctx.accounts.pool.key();
+        let (denomination, vault_bump, mint) = {
+            let pool = ctx.accounts.pool.load()?;
+            require!(fee < pool.denomination, PoolError::FeeTooHigh);
+            require!(root != [0u8; 32], PoolError::UnknownRoot);
+            require!(
+                is_field_element(&root) && is_field_element(&nullifier_hash),
+                PoolError::NotFieldElement
+            );
+            require!(pool.roots.contains(&root), PoolError::UnknownRoot);
+            (pool.denomination, pool.vault_bump, pool.mint)
+        };
+        // Paying in a different token than the pool holds would let a pool be
+        // drained through a vault someone else controls.
+        require_keys_eq!(ctx.accounts.recipient.mint, mint, PoolError::WrongMint);
+        require_keys_eq!(ctx.accounts.relayer_account.mint, mint, PoolError::WrongMint);
+
+        let nullifier = &mut ctx.accounts.nullifier;
+        nullifier.pool = pool_key;
+        nullifier.hash = nullifier_hash;
+
+        let (recipient_hi, recipient_lo) = split(&ctx.accounts.recipient.key().to_bytes());
+        let (relayer_hi, relayer_lo) = split(&ctx.accounts.relayer_account.key().to_bytes());
+        let (pool_hi, pool_lo) = split(&pool_key.to_bytes());
+        let mut fee_field = [0u8; 32];
+        fee_field[24..].copy_from_slice(&fee.to_be_bytes());
+
+        let public_inputs: [[u8; 32]; PUBLIC_INPUTS] = [
+            root,
+            nullifier_hash,
+            recipient_hi,
+            recipient_lo,
+            relayer_hi,
+            relayer_lo,
+            fee_field,
+            pool_hi,
+            pool_lo,
+        ];
+        let mut verifier = Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public_inputs, &VERIFYINGKEY)
+            .map_err(|_| error!(PoolError::BadProof))?;
+        verifier.verify().map_err(|_| error!(PoolError::BadProof))?;
+
+        let seeds: &[&[u8]] = &[b"token-vault", pool_key.as_ref(), &[vault_bump]];
+        let signer: &[&[&[u8]]] = &[seeds];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.recipient.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
+                },
+                signer,
+            ),
+            denomination - fee,
+        )?;
+
+        if fee > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    token::Transfer {
+                        from: ctx.accounts.vault.to_account_info(),
+                        to: ctx.accounts.relayer_account.to_account_info(),
+                        authority: ctx.accounts.vault_authority.to_account_info(),
+                    },
+                    signer,
+                ),
+                fee,
+            )?;
+        }
+
+        emit!(Withdrawn {
+            pool: pool_key,
+            nullifier_hash,
+            recipient: ctx.accounts.recipient.key(),
+            relayer: ctx.accounts.relayer_account.key(),
+            fee,
+            at: Clock::get()?.unix_timestamp,
+        });
+        Ok(())
+    }
+
     pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
         let pool = &mut ctx.accounts.pool.load_mut()?;
         require!(pool.pause_authority != Pubkey::default(), PoolError::NoPauseAuthority);
@@ -322,20 +493,33 @@ fn pay_from_vault<'info>(
     Ok(())
 }
 
-fn insert_leaf(pool: &mut Pool, leaf: [u8; 32]) -> Result<[u8; 32]> {
-    let mut index = pool.next_index as usize;
+/// Appends a leaf to an incremental tree and returns the new root. Takes the
+/// tree's own fields rather than the account, so a SOL pool and a token pool
+/// share one implementation — two copies of this would be two chances to
+/// diverge, and a divergence here is a proof that no longer verifies.
+fn append_leaf(
+    filled_subtrees: &mut [[u8; 32]; LEVELS],
+    next_index: u32,
+    leaf: [u8; 32],
+) -> Result<[u8; 32]> {
+    let mut index = next_index as usize;
     let mut current = leaf;
     for level in 0..LEVELS {
         let (left, right) = if index % 2 == 0 {
-            pool.filled_subtrees[level] = current;
+            filled_subtrees[level] = current;
             (current, ZEROS[level])
         } else {
-            (pool.filled_subtrees[level], current)
+            (filled_subtrees[level], current)
         };
         current = poseidon2(&left, &right)?;
         index /= 2;
     }
     Ok(current)
+}
+
+fn insert_leaf(pool: &mut Pool, leaf: [u8; 32]) -> Result<[u8; 32]> {
+    let next = pool.next_index;
+    append_leaf(&mut pool.filled_subtrees, next, leaf)
 }
 
 fn poseidon2(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32]> {
@@ -381,6 +565,30 @@ pub struct Pool {
     pub current_root_index: u8,
     pub filled_subtrees: [[u8; 32]; LEVELS],
     pub roots: [[u8; 32]; ROOT_HISTORY],
+}
+
+/// A pool holding an SPL token instead of lamports. Same tree, same proof, same
+/// relayer — the only difference is what the vault holds. It is a separate
+/// account type on purpose: the SOL pools are live with deposits inside them,
+/// and changing their layout would make those deposits unreadable.
+#[account(zero_copy)]
+#[repr(C)]
+pub struct TokenPool {
+    pub creator: Pubkey,
+    pub mint: Pubkey,
+    pub denomination: u64,
+    pub deposits: u64,
+    pub next_index: u32,
+    pub bump: u8,
+    pub vault_bump: u8,
+    pub paused: u8,
+    pub current_root_index: u8,
+    pub filled_subtrees: [[u8; 32]; LEVELS],
+    pub roots: [[u8; 32]; ROOT_HISTORY],
+}
+
+impl TokenPool {
+    pub const SIZE: usize = 8 + core::mem::size_of::<TokenPool>();
 }
 
 impl Pool {
@@ -436,6 +644,88 @@ pub struct Deposit<'info> {
     #[account(seeds = [b"key", key.owner.as_ref()], bump = key.bump)]
     pub key: Option<Account<'info, BurnKey>>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(denomination: u64)]
+pub struct InitializeTokenPool<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    #[account(
+        init,
+        payer = creator,
+        space = TokenPool::SIZE,
+        seeds = [b"token-pool", creator.key().as_ref(), mint.key().as_ref(), denomination.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub pool: AccountLoader<'info, TokenPool>,
+    pub mint: Account<'info, Mint>,
+    /// The vault is a token account whose authority is a PDA: no human can
+    /// sign for it, and the only code that can move it is this program.
+    #[account(
+        init,
+        payer = creator,
+        token::mint = mint,
+        token::authority = vault_authority,
+        seeds = [b"token-vault-account", pool.key().as_ref()],
+        bump
+    )]
+    pub vault: Account<'info, TokenAccount>,
+    /// CHECK: PDA that owns the vault, checked by its seeds. Holds no data.
+    #[account(seeds = [b"token-vault", pool.key().as_ref()], bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct DepositToken<'info> {
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+    #[account(mut)]
+    pub pool: AccountLoader<'info, TokenPool>,
+    #[account(mut, seeds = [b"token-vault-account", pool.key().as_ref()], bump)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut, constraint = from.mint == vault.mint @ PoolError::WrongMint)]
+    pub from: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+#[instruction(proof_a: [u8; 64], proof_b: [u8; 128], proof_c: [u8; 64], root: [u8; 32], nullifier_hash: [u8; 32])]
+pub struct WithdrawToken<'info> {
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+    pub pool: AccountLoader<'info, TokenPool>,
+    #[account(mut, seeds = [b"token-vault-account", pool.key().as_ref()], bump)]
+    pub vault: Account<'info, TokenAccount>,
+    /// CHECK: PDA that owns the vault, checked by its seeds.
+    #[account(seeds = [b"token-vault", pool.key().as_ref()], bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+    /// Destination token account, bound by the proof's public inputs.
+    #[account(mut)]
+    pub recipient: Account<'info, TokenAccount>,
+    /// Where the relayer's fee lands, also bound by the proof.
+    #[account(mut)]
+    pub relayer_account: Account<'info, TokenAccount>,
+    #[account(
+        init,
+        payer = relayer,
+        space = Nullifier::SIZE,
+        seeds = [b"nullifier", pool.key().as_ref(), nullifier_hash.as_ref()],
+        bump
+    )]
+    pub nullifier: Account<'info, Nullifier>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[event]
+pub struct TokenPoolOpened {
+    pub pool: Pubkey,
+    pub mint: Pubkey,
+    pub denomination: u64,
 }
 
 #[derive(Accounts)]
