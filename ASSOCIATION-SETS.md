@@ -54,10 +54,16 @@ the circuit.
 
 - [x] The circuit: a second Merkle inclusion, with `assocRoot` as a tenth public
       input (`circuits/withdraw.circom`).
-- [ ] The program: a registry of published set roots, and a withdrawal that
-      records which one was used.
-- [ ] The set builder: a reproducible script that turns a public screening list
-      into a set, so anyone can rebuild a set and check it matches its root.
+- [x] The registry: `publish_set` records a root, a label and its publisher.
+      Anyone can publish, the program never ranks them, and the seeds make a
+      published root immutable — a set that could be rewritten after a
+      withdrawal used it would be worthless.
+- [x] The set builder: `scripts/build-set.mjs` turns the pool's deposits and an
+      exclusion list into a root, and prints every leaf so a third party can
+      rebuild the same root instead of believing it. Two ways in — a relayer's
+      index or the chain itself — and a publisher who cares runs both.
+- [ ] The withdrawal that requires one: it needs the circuit with the second
+      inclusion, which needs the proving key the ceremony is producing.
 - [ ] The page: choosing a set, with what each one excludes written plainly.
 
 Until all four exist, this file describes a design, not a feature. The site says

@@ -270,6 +270,32 @@ pub mod keephost_pool {
         Ok(())
     }
 
+    /// Publishes an association set: a root, a label, and who published it.
+    ///
+    /// Anyone can publish one, and the program never ranks them. A set is worth
+    /// exactly what its publisher is worth to the person reading it — an
+    /// exchange, an auditor, a counterparty. Recording it on-chain only makes
+    /// the claim checkable: the root is fixed for ever, so a set cannot be
+    /// rewritten after a withdrawal used it.
+    ///
+    /// Withdrawals do not carry a set yet. The proof that binds one needs the
+    /// circuit with the second Merkle inclusion, which needs the proving key
+    /// the public ceremony is producing. Publishing early is deliberate: a set
+    /// is only useful once it has a history.
+    pub fn publish_set(ctx: Context<PublishSet>, root: [u8; 32], label: [u8; 32]) -> Result<()> {
+        require!(is_field_element(&root), PoolError::NotFieldElement);
+        require!(root != [0u8; 32], PoolError::NotFieldElement);
+
+        let set = &mut ctx.accounts.set;
+        set.publisher = ctx.accounts.publisher.key();
+        set.root = root;
+        set.label = label;
+        set.at = Clock::get()?.unix_timestamp;
+
+        emit!(SetPublished { publisher: set.publisher, root, label, at: set.at });
+        Ok(())
+    }
+
     /// Burns KEEPHOST tokens and mints a key: from then on, this wallet pays no
     /// deposit fee, for good. The tokens are destroyed by the token program —
     /// they do not come to us, and nothing here can give them back.
@@ -624,6 +650,21 @@ impl Pool {
     pub const SIZE: usize = 8 + core::mem::size_of::<Pool>();
 }
 
+/// A published association set. The seeds pin it to its publisher and its
+/// root, so `init` makes a second publication of the same pair fail rather
+/// than overwrite the first — a set that could be rewritten would be worthless.
+#[account]
+pub struct AssociationSet {
+    pub publisher: Pubkey,
+    pub root: [u8; 32],
+    pub label: [u8; 32],
+    pub at: i64,
+}
+
+impl AssociationSet {
+    pub const SIZE: usize = 8 + 32 + 32 + 32 + 8;
+}
+
 #[account]
 pub struct Nullifier {
     pub pool: Pubkey,
@@ -763,6 +804,30 @@ pub struct TokenPoolOpened {
     pub pool: Pubkey,
     pub mint: Pubkey,
     pub denomination: u64,
+}
+
+#[derive(Accounts)]
+#[instruction(root: [u8; 32])]
+pub struct PublishSet<'info> {
+    #[account(mut)]
+    pub publisher: Signer<'info>,
+    #[account(
+        init,
+        payer = publisher,
+        space = AssociationSet::SIZE,
+        seeds = [b"assoc", publisher.key().as_ref(), root.as_ref()],
+        bump
+    )]
+    pub set: Account<'info, AssociationSet>,
+    pub system_program: Program<'info, System>,
+}
+
+#[event]
+pub struct SetPublished {
+    pub publisher: Pubkey,
+    pub root: [u8; 32],
+    pub label: [u8; 32],
+    pub at: i64,
 }
 
 #[derive(Accounts)]
