@@ -34,7 +34,7 @@ far, each one chaining onto the last:
 Verify that chain yourself — it takes one command and no trust:
 
 ```bash
-curl -L -o pot.ptau https://keephost.fun/ceremony/pot14_0002.ptau
+curl -L -o pot.ptau https://keephost.fun/ceremony/pot15_0001.ptau
 npx snarkjs powersoftau verify pot.ptau
 ```
 
@@ -44,15 +44,36 @@ our randomness away. The ceremony becomes worth something the moment somebody
 with no stake in KeepHost contributes and destroys theirs. Until then this file
 stays open and the reserve stays on the front page.
 
-The current file is <https://keephost.fun/ceremony/pot14_0002.ptau>
+The current file is <https://keephost.fun/ceremony/pot15_0001.ptau>
 (sha256 `3b3655b12d98e13f082681b1975a21d9…`).
+
+## Restarted at 2^15 on 24 September 2026
+
+The circuit grew. Association sets add a second Merkle inclusion to every
+withdrawal proof, which took it from about 11,000 constraints to 21,739 — above
+the 16,384 a 2^14 setup can serve. A ceremony that cannot serve the circuit is
+worthless, so this one restarted at 2^15.
+
+Two contributions were discarded. Both were ours, so nobody lost work, and it
+is far better to find this with two than with fifty. The old files stay online
+at `pot14_0001.ptau` and `pot14_0002.ptau` so the restart can be checked rather
+than believed.
+
+The file to contribute to is now **`pot15_0001.ptau`**. First contribution hash:
+
+```
+eca6f514 b89180fc fc6bf9f8 81a5670c
+45419054 f1f6fec9 3628d6d1 bf995fbf
+677d427c d40a7c05 ebb14fe5 ee96aff2
+b4994dc0 e2904852 b408a9e7 fe36a02e
+```
 
 ## How to contribute (about two minutes)
 
 You need Node. Nothing else, and nothing to install permanently.
 
 ```bash
-curl -L -o pot_in.ptau https://keephost.fun/ceremony/pot14_0002.ptau
+curl -L -o pot_in.ptau https://keephost.fun/ceremony/pot15_0001.ptau
 npx snarkjs powersoftau verify pot_in.ptau
 npx snarkjs powersoftau contribute pot_in.ptau pot_out.ptau --name="<your name>" -v
 ```

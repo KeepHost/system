@@ -62,20 +62,11 @@ template Withdraw(levels) {
     signal input fee;
     signal input poolHi;
     signal input poolLo;
-    // The root of the association set this withdrawal claims membership of.
-    // Published, so whoever cares can see WHICH set was used and decide what
-    // that set is worth to them.
-    signal input assocRoot;
 
     signal input nullifier;
     signal input secret;
     signal input pathElements[levels];
     signal input pathIndices[levels];
-    // The path of the same commitment inside the association set. The set is
-    // a second tree over a subset of the deposits, built by anyone and
-    // published; proving membership of it proves nothing about which deposit.
-    signal input assocPathElements[levels];
-    signal input assocPathIndices[levels];
 
     component hasher = CommitmentHasher();
     hasher.nullifier <== nullifier;
@@ -89,17 +80,6 @@ template Withdraw(levels) {
         tree.pathIndices[i] <== pathIndices[i];
     }
     tree.root === root;
-
-    // Second inclusion: the same commitment, inside the chosen set. A user who
-    // cannot be in a set simply cannot produce this proof — and nobody learns
-    // which leaf they are, in either tree.
-    component assoc = MerklePath(levels);
-    assoc.leaf <== hasher.commitment;
-    for (var i = 0; i < levels; i++) {
-        assoc.pathElements[i] <== assocPathElements[i];
-        assoc.pathIndices[i] <== assocPathIndices[i];
-    }
-    assoc.root === assocRoot;
 
     // Squared only so the compiler keeps them in the constraint system;
     // otherwise they are optimized out and a relayer can rewrite them.
@@ -119,4 +99,4 @@ template Withdraw(levels) {
     poolLoSq <== poolLo * poolLo;
 }
 
-component main {public [root, nullifierHash, recipientHi, recipientLo, relayerHi, relayerLo, fee, poolHi, poolLo, assocRoot]} = Withdraw(20);
+component main {public [root, nullifierHash, recipientHi, recipientLo, relayerHi, relayerLo, fee, poolHi, poolLo]} = Withdraw(20);
