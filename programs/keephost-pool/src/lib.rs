@@ -12,7 +12,8 @@ use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program::rent::Rent as SolRent;
 use anchor_lang::solana_program::system_instruction;
 use groth16_solana::groth16::Groth16Verifier;
-use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount};
+pub mod spl;
+use spl::TOKEN_PROGRAM_ID;
 use solana_poseidon::{hashv, Endianness, Parameters};
 
 pub mod verifying_key;
@@ -167,6 +168,40 @@ pub mod keephost_pool {
     /// a token account owned by a PDA — an address with no private key.
     pub fn initialize_token_pool(ctx: Context<InitializeTokenPool>, denomination: u64) -> Result<()> {
         require!(denomination > 0, PoolError::BadDenomination);
+
+        // The vault token account, created by hand so the binary does not carry
+        // the Token-2022 surface it would otherwise need. Same result: an
+        // account of the token program, for this mint, owned by a PDA.
+        let pool_key = ctx.accounts.pool.key();
+        let vault_seeds: &[&[u8]] = &[
+            b"token-vault-account",
+            pool_key.as_ref(),
+            &[ctx.bumps.vault],
+        ];
+        // A token account is 165 bytes. The constant is the token program's,
+        // not ours, and it has never changed.
+        let space = 165usize;
+        let lamports = SolRent::get()?.minimum_balance(space);
+        anchor_lang::system_program::create_account(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::CreateAccount {
+                    from: ctx.accounts.creator.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            lamports,
+            space as u64,
+            &ctx.accounts.token_program.key(),
+        )?;
+        spl::initialize_account3(
+            &ctx.accounts.token_program,
+            &ctx.accounts.vault,
+            &ctx.accounts.mint,
+            &ctx.accounts.vault_authority.key(),
+        )?;
+
         let pool = &mut ctx.accounts.pool.load_init()?;
         pool.creator = ctx.accounts.creator.key();
         pool.mint = ctx.accounts.mint.key();
@@ -203,16 +238,17 @@ pub mod keephost_pool {
             pool.denomination
         };
 
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                token::Transfer {
-                    from: ctx.accounts.from.to_account_info(),
-                    to: ctx.accounts.vault.to_account_info(),
-                    authority: ctx.accounts.depositor.to_account_info(),
-                },
-            ),
+        let (from_mint, from_owner) = spl::read_token_account(&ctx.accounts.from)?;
+        let (vault_mint, _) = spl::read_token_account(&ctx.accounts.vault)?;
+        require_keys_eq!(from_mint, vault_mint, PoolError::WrongMint);
+        require_keys_eq!(from_owner, ctx.accounts.depositor.key(), PoolError::WrongMint);
+        spl::transfer(
+            &ctx.accounts.token_program,
+            &ctx.accounts.from,
+            &ctx.accounts.vault,
+            &ctx.accounts.depositor,
             denomination,
+            None,
         )?;
 
         let pool = &mut ctx.accounts.pool.load_mut()?;
@@ -240,15 +276,14 @@ pub mod keephost_pool {
     pub fn burn_for_key(ctx: Context<BurnForKey>, amount: u64) -> Result<()> {
         require!(amount >= KEY_BURN, PoolError::BurnTooSmall);
 
-        token::burn(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Burn {
-                    mint: ctx.accounts.mint.to_account_info(),
-                    from: ctx.accounts.from.to_account_info(),
-                    authority: ctx.accounts.owner.to_account_info(),
-                },
-            ),
+        let (mint, owner) = spl::read_token_account(&ctx.accounts.from)?;
+        require_keys_eq!(mint, KEEPHOST_MINT, PoolError::WrongMint);
+        require_keys_eq!(owner, ctx.accounts.owner.key(), PoolError::WrongMint);
+        spl::burn(
+            &ctx.accounts.token_program,
+            &ctx.accounts.mint,
+            &ctx.accounts.from,
+            &ctx.accounts.owner,
             amount,
         )?;
 
@@ -384,8 +419,10 @@ pub mod keephost_pool {
         };
         // Paying in a different token than the pool holds would let a pool be
         // drained through a vault someone else controls.
-        require_keys_eq!(ctx.accounts.recipient.mint, mint, PoolError::WrongMint);
-        require_keys_eq!(ctx.accounts.relayer_account.mint, mint, PoolError::WrongMint);
+        let (recipient_mint, _) = spl::read_token_account(&ctx.accounts.recipient)?;
+        let (relayer_mint, _) = spl::read_token_account(&ctx.accounts.relayer_account)?;
+        require_keys_eq!(recipient_mint, mint, PoolError::WrongMint);
+        require_keys_eq!(relayer_mint, mint, PoolError::WrongMint);
 
         let nullifier = &mut ctx.accounts.nullifier;
         nullifier.pool = pool_key;
@@ -415,31 +452,23 @@ pub mod keephost_pool {
         let seeds: &[&[u8]] = &[b"token-vault", pool_key.as_ref(), &[vault_bump]];
         let signer: &[&[&[u8]]] = &[seeds];
 
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                token::Transfer {
-                    from: ctx.accounts.vault.to_account_info(),
-                    to: ctx.accounts.recipient.to_account_info(),
-                    authority: ctx.accounts.vault_authority.to_account_info(),
-                },
-                signer,
-            ),
+        spl::transfer(
+            &ctx.accounts.token_program,
+            &ctx.accounts.vault,
+            &ctx.accounts.recipient,
+            &ctx.accounts.vault_authority,
             denomination - fee,
+            Some(signer),
         )?;
 
         if fee > 0 {
-            token::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    token::Transfer {
-                        from: ctx.accounts.vault.to_account_info(),
-                        to: ctx.accounts.relayer_account.to_account_info(),
-                        authority: ctx.accounts.vault_authority.to_account_info(),
-                    },
-                    signer,
-                ),
+            spl::transfer(
+                &ctx.accounts.token_program,
+                &ctx.accounts.vault,
+                &ctx.accounts.relayer_account,
+                &ctx.accounts.vault_authority,
                 fee,
+                Some(signer),
             )?;
         }
 
@@ -659,24 +688,25 @@ pub struct InitializeTokenPool<'info> {
         bump
     )]
     pub pool: AccountLoader<'info, TokenPool>,
-    pub mint: Account<'info, Mint>,
+    /// CHECK: the mint this pool accepts. The token program checks it when the
+    /// vault is created against it.
+    pub mint: UncheckedAccount<'info>,
     /// The vault is a token account whose authority is a PDA: no human can
     /// sign for it, and the only code that can move it is this program.
-    #[account(
-        init,
-        payer = creator,
-        token::mint = mint,
-        token::authority = vault_authority,
-        seeds = [b"token-vault-account", pool.key().as_ref()],
-        bump
-    )]
-    pub vault: Account<'info, TokenAccount>,
+    ///
+    /// CHECK: created here by CPI rather than by Anchor's `init`. The `init`
+    /// form drags the whole Token-2022 surface into the binary — 160 kB that
+    /// would have to be paid for in rent, for a constraint we enforce by hand
+    /// three lines below.
+    #[account(mut, seeds = [b"token-vault-account", pool.key().as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
     /// CHECK: PDA that owns the vault, checked by its seeds. Holds no data.
     #[account(seeds = [b"token-vault", pool.key().as_ref()], bump)]
     pub vault_authority: UncheckedAccount<'info>,
-    pub token_program: Program<'info, Token>,
+    /// CHECK: the SPL token program, pinned by address.
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
@@ -685,11 +715,15 @@ pub struct DepositToken<'info> {
     pub depositor: Signer<'info>,
     #[account(mut)]
     pub pool: AccountLoader<'info, TokenPool>,
+    /// CHECK: the pool's token account, checked by its seeds and read by hand.
     #[account(mut, seeds = [b"token-vault-account", pool.key().as_ref()], bump)]
-    pub vault: Account<'info, TokenAccount>,
-    #[account(mut, constraint = from.mint == vault.mint @ PoolError::WrongMint)]
-    pub from: Account<'info, TokenAccount>,
-    pub token_program: Program<'info, Token>,
+    pub vault: UncheckedAccount<'info>,
+    /// CHECK: the depositor's token account; its mint and owner are checked.
+    #[account(mut)]
+    pub from: UncheckedAccount<'info>,
+    /// CHECK: the SPL token program, pinned by address.
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -698,17 +732,18 @@ pub struct WithdrawToken<'info> {
     #[account(mut)]
     pub relayer: Signer<'info>,
     pub pool: AccountLoader<'info, TokenPool>,
+    /// CHECK: the pool's token account, checked by its seeds and read by hand.
     #[account(mut, seeds = [b"token-vault-account", pool.key().as_ref()], bump)]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: UncheckedAccount<'info>,
     /// CHECK: PDA that owns the vault, checked by its seeds.
     #[account(seeds = [b"token-vault", pool.key().as_ref()], bump)]
     pub vault_authority: UncheckedAccount<'info>,
-    /// Destination token account, bound by the proof's public inputs.
+    /// CHECK: destination token account, bound by the proof's public inputs.
     #[account(mut)]
-    pub recipient: Account<'info, TokenAccount>,
-    /// Where the relayer's fee lands, also bound by the proof.
+    pub recipient: UncheckedAccount<'info>,
+    /// CHECK: where the relayer's fee lands, also bound by the proof.
     #[account(mut)]
-    pub relayer_account: Account<'info, TokenAccount>,
+    pub relayer_account: UncheckedAccount<'info>,
     #[account(
         init,
         payer = relayer,
@@ -717,7 +752,9 @@ pub struct WithdrawToken<'info> {
         bump
     )]
     pub nullifier: Account<'info, Nullifier>,
-    pub token_program: Program<'info, Token>,
+    /// CHECK: the SPL token program, pinned by address.
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -735,11 +772,15 @@ pub struct BurnForKey<'info> {
     /// One key per wallet: `init` makes a second one fail rather than reset it.
     #[account(init, payer = owner, space = BurnKey::SIZE, seeds = [b"key", owner.key().as_ref()], bump)]
     pub key: Account<'info, BurnKey>,
+    /// CHECK: the KEEPHOST mint, pinned by address.
     #[account(mut, address = KEEPHOST_MINT)]
-    pub mint: Account<'info, Mint>,
-    #[account(mut, constraint = from.mint == KEEPHOST_MINT @ PoolError::WrongMint)]
-    pub from: Account<'info, TokenAccount>,
-    pub token_program: Program<'info, Token>,
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: the holder's token account; its mint and owner are checked.
+    #[account(mut)]
+    pub from: UncheckedAccount<'info>,
+    /// CHECK: the SPL token program, pinned by address.
+    #[account(address = TOKEN_PROGRAM_ID)]
+    pub token_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
