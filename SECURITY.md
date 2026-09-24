@@ -95,7 +95,8 @@ renounce instruction.
 - [ ] Multi-participant ceremony from a public phase one, then redeploy
 - [ ] External audit, report published
 - [ ] Upgrade authority revoked
-- [ ] Browser deposit and withdrawal, so using this needs no terminal
+- [x] Browser deposit and withdrawal, so using this needs no terminal
+- [x] A relayer, so a withdrawal is not signed by the wallet that deposited
 
 ## Reporting a problem
 

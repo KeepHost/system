@@ -12,6 +12,7 @@ use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program::rent::Rent as SolRent;
 use anchor_lang::solana_program::system_instruction;
 use groth16_solana::groth16::Groth16Verifier;
+use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount};
 use solana_poseidon::{hashv, Endianness, Parameters};
 
 pub mod verifying_key;
@@ -25,6 +26,15 @@ declare_id!("CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW");
 pub const LEVELS: usize = 20;
 pub const ROOT_HISTORY: usize = 32;
 pub const PUBLIC_INPUTS: usize = 9;
+/// Deposit fee, in hundredths of a percent: 50 = 0.5% of the denomination.
+/// Charged on top of the deposit, never taken out of it — the vault must hold
+/// exactly one denomination per deposit or a withdrawal cannot pay out.
+pub const FEE_BPS: u64 = 50;
+/// The KEEPHOST mint. Burning from it is the only way to mint a key, and the
+/// address is fixed here so no other token can be passed in its place.
+pub const KEEPHOST_MINT: Pubkey = pubkey!("4c1XZRqFV6y8pAckHru5oiGPYUFw1eQ3kFotPLHrpump");
+/// Tokens to burn for one key, in base units (6 decimals): 1,000,000 tokens.
+pub const KEY_BURN: u64 = 1_000_000_000_000;
 
 pub const FIELD_MODULUS: [u8; 32] = [
     0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
@@ -102,6 +112,37 @@ pub mod keephost_pool {
             denomination,
         )?;
 
+        // The fee is charged on top and goes to its own account, never into the
+        // vault: the vault must hold exactly one denomination per deposit, or
+        // the last withdrawal cannot be paid. A key belonging to this depositor
+        // exempts them — that is what burning tokens buys, and the only thing
+        // it buys.
+        let exempt = match &ctx.accounts.key {
+            Some(key) => key.owner == ctx.accounts.depositor.key(),
+            None => false,
+        };
+        let fee = if exempt { 0 } else { denomination / 10_000 * FEE_BPS };
+        if fee > 0 {
+            // Solana refuses to leave an account below the rent-exempt minimum,
+            // and one deposit fee is smaller than that minimum. So the first
+            // deposit after this account is empty also pays what it takes to
+            // bring it up — once, never again, and it stays in the account
+            // rather than going anywhere.
+            let rent_min = SolRent::get()?.minimum_balance(0);
+            let have = ctx.accounts.fees.lamports();
+            let top_up = rent_min.saturating_sub(have.saturating_add(fee));
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.depositor.to_account_info(),
+                        to: ctx.accounts.fees.to_account_info(),
+                    },
+                ),
+                fee.saturating_add(top_up),
+            )?;
+        }
+
         let pool = &mut ctx.accounts.pool.load_mut()?;
         let leaf_index = pool.next_index;
         let root = insert_leaf(pool, commitment)?;
@@ -118,6 +159,34 @@ pub mod keephost_pool {
             root,
             at: Clock::get()?.unix_timestamp,
         });
+        Ok(())
+    }
+
+    /// Burns KEEPHOST tokens and mints a key: from then on, this wallet pays no
+    /// deposit fee, for good. The tokens are destroyed by the token program —
+    /// they do not come to us, and nothing here can give them back.
+    pub fn burn_for_key(ctx: Context<BurnForKey>, amount: u64) -> Result<()> {
+        require!(amount >= KEY_BURN, PoolError::BurnTooSmall);
+
+        token::burn(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Burn {
+                    mint: ctx.accounts.mint.to_account_info(),
+                    from: ctx.accounts.from.to_account_info(),
+                    authority: ctx.accounts.owner.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        let key = &mut ctx.accounts.key;
+        key.owner = ctx.accounts.owner.key();
+        key.burned = amount;
+        key.at = Clock::get()?.unix_timestamp;
+        key.bump = ctx.bumps.key;
+
+        emit!(KeyMinted { owner: key.owner, burned: amount, at: key.at });
         Ok(())
     }
 
@@ -169,10 +238,37 @@ pub mod keephost_pool {
             .map_err(|_| error!(PoolError::BadProof))?;
         verifier.verify().map_err(|_| error!(PoolError::BadProof))?;
 
+        // The relayer's fee is paid out of the deposit fees when there are
+        // enough, and out of the withdrawal only when there are not. That is
+        // what the fee account is for: deposits make withdrawals free, and the
+        // person withdrawing gets the whole denomination.
+        let rent_min = SolRent::get()?.minimum_balance(0);
+        let pot = ctx.accounts.fees.lamports();
+        let from_pot = fee > 0 && pot >= fee.saturating_add(rent_min);
+
         let seeds: &[&[u8]] = &[b"vault", pool_key.as_ref(), &[vault_bump]];
-        pay_from_vault(&ctx, seeds, &ctx.accounts.recipient.to_account_info(), denomination - fee)?;
+        let to_recipient = if from_pot { denomination } else { denomination - fee };
+        pay_from_vault(&ctx, seeds, &ctx.accounts.recipient.to_account_info(), to_recipient)?;
+
         if fee > 0 {
-            pay_from_vault(&ctx, seeds, &ctx.accounts.relayer.to_account_info(), fee)?;
+            if from_pot {
+                let fee_seeds: &[&[u8]] = &[b"fees", pool_key.as_ref(), &[ctx.bumps.fees]];
+                invoke_signed(
+                    &system_instruction::transfer(
+                        &ctx.accounts.fees.key(),
+                        &ctx.accounts.relayer.key(),
+                        fee,
+                    ),
+                    &[
+                        ctx.accounts.fees.to_account_info(),
+                        ctx.accounts.relayer.to_account_info(),
+                        ctx.accounts.system_program.to_account_info(),
+                    ],
+                    &[fee_seeds],
+                )?;
+            } else {
+                pay_from_vault(&ctx, seeds, &ctx.accounts.relayer.to_account_info(), fee)?;
+            }
         }
 
         emit!(Withdrawn {
@@ -331,7 +427,42 @@ pub struct Deposit<'info> {
     /// CHECK: vault PDA, checked by its seeds.
     #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
     pub vault: UncheckedAccount<'info>,
+    /// CHECK: fee PDA, checked by its seeds. Holds lamports and nothing else.
+    #[account(mut, seeds = [b"fees", pool.key().as_ref()], bump)]
+    pub fees: UncheckedAccount<'info>,
+    /// The depositor's key, if they have one. Its seeds tie it to a wallet, so
+    /// passing someone else's changes nothing: the fee is waived only when the
+    /// key belongs to the signer.
+    #[account(seeds = [b"key", key.owner.as_ref()], bump = key.bump)]
+    pub key: Option<Account<'info, BurnKey>>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BurnForKey<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    /// One key per wallet: `init` makes a second one fail rather than reset it.
+    #[account(init, payer = owner, space = BurnKey::SIZE, seeds = [b"key", owner.key().as_ref()], bump)]
+    pub key: Account<'info, BurnKey>,
+    #[account(mut, address = KEEPHOST_MINT)]
+    pub mint: Account<'info, Mint>,
+    #[account(mut, constraint = from.mint == KEEPHOST_MINT @ PoolError::WrongMint)]
+    pub from: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[account]
+pub struct BurnKey {
+    pub owner: Pubkey,
+    pub burned: u64,
+    pub at: i64,
+    pub bump: u8,
+}
+
+impl BurnKey {
+    pub const SIZE: usize = 8 + 32 + 8 + 8 + 1;
 }
 
 #[derive(Accounts)]
@@ -343,6 +474,9 @@ pub struct Withdraw<'info> {
     /// CHECK: vault PDA, checked by its seeds.
     #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
     pub vault: UncheckedAccount<'info>,
+    /// CHECK: fee PDA, checked by its seeds. It pays the relayer when it can.
+    #[account(mut, seeds = [b"fees", pool.key().as_ref()], bump)]
+    pub fees: UncheckedAccount<'info>,
     /// CHECK: destination address, bound by the proof's public inputs.
     #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
@@ -401,8 +535,19 @@ pub struct PauseRenounced {
     pub pool: Pubkey,
 }
 
+#[event]
+pub struct KeyMinted {
+    pub owner: Pubkey,
+    pub burned: u64,
+    pub at: i64,
+}
+
 #[error_code]
 pub enum PoolError {
+    #[msg("Burn at least the amount one key costs")]
+    BurnTooSmall,
+    #[msg("That token account is not the KEEPHOST mint")]
+    WrongMint,
     #[msg("Denomination must cover the rent-exempt minimum")]
     BadDenomination,
     #[msg("New deposits are paused")]

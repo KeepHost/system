@@ -49,6 +49,9 @@ const poolPda = PublicKey.findProgramAddressSync(
   PROGRAM_ID,
 )[0];
 const vaultPda = PublicKey.findProgramAddressSync([Buffer.from("vault"), poolPda.toBuffer()], PROGRAM_ID)[0];
+// Deposit fees land here, never in the vault: the vault must hold exactly one
+// denomination per deposit or the last withdrawal cannot be paid.
+const feesPda = PublicKey.findProgramAddressSync([Buffer.from("fees"), poolPda.toBuffer()], PROGRAM_ID)[0];
 
 const log = (...a) => console.log(...a);
 
@@ -93,6 +96,10 @@ async function deposit(receipt) {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: poolPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
+      { pubkey: feesPda, isSigner: false, isWritable: true },
+      // No key: this depositor burned nothing, so they pay the fee. An optional
+      // account left out is passed as the program id itself.
+      { pubkey: PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data,
@@ -135,6 +142,7 @@ async function withdraw({ receipt, leaves, index, recipient, fee }) {
       { pubkey: relayer.publicKey, isSigner: true, isWritable: true },
       { pubkey: poolPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
+      { pubkey: feesPda, isSigner: false, isWritable: true },
       { pubkey: recipient, isSigner: false, isWritable: true },
       { pubkey: nullifierPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -151,7 +159,10 @@ async function main() {
   // Combien de dépôts ce test fait. Sur un réseau où le SOL a de la valeur, un
   // seul suffit : la foule est déjà dans l'arbre, et chaque dépôt de plus est
   // de l'argent immobilisé si quelque chose échoue ensuite.
-  const COUNT = Number(args.deposits || (RPC_URL.includes("127.0.0.1") ? 3 : 1));
+  // Six deposits locally, not three: at 0.5% of 0.1 SOL a deposit fee is
+  // 0.0005 SOL, so it takes four of them to cover one relayer fee. Fewer and
+  // the test never reaches the path where the fee pot pays.
+  const COUNT = Number(args.deposits || (RPC_URL.includes("127.0.0.1") ? 6 : 1));
   await ensureFunds(payer.publicKey, (Number(DENOM) * COUNT) / LAMPORTS_PER_SOL + 0.05);
   await initializeIfNeeded();
 
@@ -193,12 +204,23 @@ async function main() {
 
   const recipient = Keypair.generate().publicKey;
   const before = await conn.getBalance(recipient);
-  const fee = 0;
+  // A real relayer fee, so the test exercises the path that matters: when the
+  // deposit fees cover it, the relayer is paid out of them and the person
+  // withdrawing receives the whole denomination.
+  const fee = 2_000_000;
+  const potBefore = await conn.getBalance(feesPda);
   const sig = await withdraw({ receipt: reread, leaves, index: mine, recipient, fee });
   const after = await conn.getBalance(recipient);
   log(`withdrawal to ${recipient.toBase58()} · ${sig}`);
-  log(`received ${(after - before) / LAMPORTS_PER_SOL} SOL (expected ${Number(DENOM - BigInt(fee)) / LAMPORTS_PER_SOL})`);
-  if (BigInt(after - before) !== DENOM - BigInt(fee)) throw new Error("unexpected amount received");
+  const potAfter = await conn.getBalance(feesPda);
+  const paidFromPot = potBefore - potAfter === fee;
+  const expected = paidFromPot ? DENOM : DENOM - BigInt(fee);
+  log(
+    `received ${(after - before) / LAMPORTS_PER_SOL} SOL (expected ${Number(expected) / LAMPORTS_PER_SOL})` +
+      ` · relayer fee paid by ${paidFromPot ? "the deposit fees" : "the withdrawal"}`,
+  );
+  if (BigInt(after - before) !== expected) throw new Error("unexpected amount received");
+  if (!paidFromPot) throw new Error("the fee pot did not pay the relayer");
 
   let doubleSpend = "refused";
   try {
