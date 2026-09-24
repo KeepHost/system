@@ -53,7 +53,12 @@ the circuit.
 ## What is built, and what is not
 
 - [x] The circuit: a second Merkle inclusion, with `assocRoot` as a tenth public
-      input (`circuits/withdraw.circom`).
+      input. It lives in `circuits/withdraw-assoc.circom`, beside the one that
+      is deployed, and not in its place: the running program verifies nine
+      public inputs against a key that exists, and a repository whose circuit
+      does not match its deployment is a repository nobody can check.
+      `withdraw.circom` stays what mainnet runs until the ceremony produces the
+      key for the other one.
 - [x] The registry: `publish_set` records a root, a label and its publisher.
       Anyone can publish, the program never ranks them, and the seeds make a
       published root immutable — a set that could be rewritten after a
