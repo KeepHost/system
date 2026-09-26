@@ -67,8 +67,17 @@ the circuit.
       exclusion list into a root, and prints every leaf so a third party can
       rebuild the same root instead of believing it. Two ways in — a relayer's
       index or the chain itself — and a publisher who cares runs both.
-- [ ] The withdrawal that requires one: it needs the circuit with the second
-      inclusion, which needs the proving key the ceremony is producing.
+- [x] The withdrawal that proves one: `withdraw_with_set` verifies ten public
+      inputs against a second verifying key, and checks the set root in the
+      proof against a published set account. It lives beside `withdraw` rather
+      than replacing it, so a receipt written before sets existed keeps working
+      — and both share the same nullifier account, so a deposit still cannot be
+      spent twice by taking the other door. Tested end to end: a withdrawal
+      proving membership of a set is paid, and the same proof against a set the
+      deposit is not in is refused.
+- [ ] The production key. The test above runs on a throwaway key this
+      repository generates. The key that ships comes from the public ceremony,
+      and until it does, `withdraw_with_set` is compiled but not deployed.
 - [ ] The page: choosing a set, with what each one excludes written plainly.
 
 Until all four exist, this file describes a design, not a feature. The site says

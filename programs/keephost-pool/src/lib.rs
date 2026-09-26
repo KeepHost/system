@@ -19,6 +19,9 @@ use solana_poseidon::{hashv, Endianness, Parameters};
 pub mod verifying_key;
 use verifying_key::VERIFYINGKEY;
 
+pub mod verifying_key_assoc;
+use verifying_key_assoc::VERIFYINGKEY_ASSOC;
+
 pub mod zeros;
 use zeros::ZEROS;
 
@@ -27,6 +30,9 @@ declare_id!("CTHg29kf7L6TNDH5TSd3tdoZfsmP39JjyQWKmPtEY1YW");
 pub const LEVELS: usize = 20;
 pub const ROOT_HISTORY: usize = 32;
 pub const PUBLIC_INPUTS: usize = 9;
+/// The same inputs plus the association set root, for the circuit that proves
+/// membership of a chosen set as well as membership of the pool.
+pub const PUBLIC_INPUTS_ASSOC: usize = 10;
 /// Deposit fee, in hundredths of a percent: 50 = 0.5% of the denomination.
 /// Charged on top of the deposit, never taken out of it — the vault must hold
 /// exactly one denomination per deposit or a withdrawal cannot pay out.
@@ -265,6 +271,105 @@ pub mod keephost_pool {
             commitment,
             leaf_index,
             root,
+            at: Clock::get()?.unix_timestamp,
+        });
+        Ok(())
+    }
+
+    /// Withdraws on a proof that also shows the deposit belongs to a chosen set.
+    ///
+    /// Same money path as `withdraw`, one more thing proved. The set root is a
+    /// public input, so an observer sees which set was claimed and nothing
+    /// else; the program checks that root against a published set account and
+    /// never judges the set itself. Whoever cares reads the publisher.
+    ///
+    /// The two withdrawals live side by side deliberately. A receipt written
+    /// before sets existed keeps working through `withdraw`, and both share the
+    /// same nullifier account, so a deposit still cannot be spent twice by
+    /// taking the other door.
+    pub fn withdraw_with_set<'info>(
+        ctx: Context<'_, '_, '_, 'info, WithdrawWithSet<'info>>,
+        proof_a: [u8; 64],
+        proof_b: [u8; 128],
+        proof_c: [u8; 64],
+        root: [u8; 32],
+        nullifier_hash: [u8; 32],
+        fee: u64,
+    ) -> Result<()> {
+        let pool_key = ctx.accounts.pool.key();
+        let (denomination, vault_bump) = {
+            let pool = ctx.accounts.pool.load()?;
+            require!(fee < pool.denomination, PoolError::FeeTooHigh);
+            require!(root != [0u8; 32], PoolError::UnknownRoot);
+            require!(
+                is_field_element(&root) && is_field_element(&nullifier_hash),
+                PoolError::NotFieldElement
+            );
+            require!(pool.roots.contains(&root), PoolError::UnknownRoot);
+            (pool.denomination, pool.vault_bump)
+        };
+
+        let nullifier = &mut ctx.accounts.nullifier;
+        nullifier.pool = pool_key;
+        nullifier.hash = nullifier_hash;
+
+        let assoc_root = ctx.accounts.set.root;
+        let (recipient_hi, recipient_lo) = split(&ctx.accounts.recipient.key().to_bytes());
+        let (relayer_hi, relayer_lo) = split(&ctx.accounts.relayer.key().to_bytes());
+        let (pool_hi, pool_lo) = split(&pool_key.to_bytes());
+        let mut fee_field = [0u8; 32];
+        fee_field[24..].copy_from_slice(&fee.to_be_bytes());
+
+        let public_inputs: [[u8; 32]; PUBLIC_INPUTS_ASSOC] = [
+            root,
+            nullifier_hash,
+            recipient_hi,
+            recipient_lo,
+            relayer_hi,
+            relayer_lo,
+            fee_field,
+            pool_hi,
+            pool_lo,
+            assoc_root,
+        ];
+        let mut verifier =
+            Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public_inputs, &VERIFYINGKEY_ASSOC)
+                .map_err(|_| error!(PoolError::BadProof))?;
+        verifier.verify().map_err(|_| error!(PoolError::BadProof))?;
+
+        let seeds: &[&[u8]] = &[b"vault", pool_key.as_ref(), &[vault_bump]];
+        invoke_signed(
+            &system_instruction::transfer(
+                &ctx.accounts.vault.key(),
+                &ctx.accounts.recipient.key(),
+                denomination - fee,
+            ),
+            &[
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.recipient.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[seeds],
+        )?;
+        if fee > 0 {
+            invoke_signed(
+                &system_instruction::transfer(&ctx.accounts.vault.key(), &ctx.accounts.relayer.key(), fee),
+                &[
+                    ctx.accounts.vault.to_account_info(),
+                    ctx.accounts.relayer.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+                &[seeds],
+            )?;
+        }
+
+        emit!(WithdrawnFromSet {
+            pool: pool_key,
+            nullifier_hash,
+            recipient: ctx.accounts.recipient.key(),
+            set: ctx.accounts.set.key(),
+            assoc_root,
+            fee,
             at: Clock::get()?.unix_timestamp,
         });
         Ok(())
@@ -807,6 +912,48 @@ pub struct TokenPoolOpened {
 }
 
 #[derive(Accounts)]
+#[instruction(proof_a: [u8; 64], proof_b: [u8; 128], proof_c: [u8; 64], root: [u8; 32], nullifier_hash: [u8; 32])]
+pub struct WithdrawWithSet<'info> {
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+    #[account(
+        seeds = [b"pool", pool.load()?.creator.as_ref(), pool.load()?.denomination.to_le_bytes().as_ref()],
+        bump = pool.load()?.bump
+    )]
+    pub pool: AccountLoader<'info, Pool>,
+    /// CHECK: vault PDA, checked by its seeds.
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
+    /// CHECK: destination address, bound by the proof's public inputs.
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+    /// The set this withdrawal claims membership of. Its seeds tie the root to
+    /// its publisher, so naming a set is naming who vouched for it.
+    #[account(seeds = [b"assoc", set.publisher.as_ref(), set.root.as_ref()], bump)]
+    pub set: Account<'info, AssociationSet>,
+    #[account(
+        init,
+        payer = relayer,
+        space = Nullifier::SIZE,
+        seeds = [b"nullifier", pool.key().as_ref(), nullifier_hash.as_ref()],
+        bump
+    )]
+    pub nullifier: Account<'info, Nullifier>,
+    pub system_program: Program<'info, System>,
+}
+
+#[event]
+pub struct WithdrawnFromSet {
+    pub pool: Pubkey,
+    pub nullifier_hash: [u8; 32],
+    pub recipient: Pubkey,
+    pub set: Pubkey,
+    pub assoc_root: [u8; 32],
+    pub fee: u64,
+    pub at: i64,
+}
+
+#[derive(Accounts)]
 #[instruction(root: [u8; 32])]
 pub struct PublishSet<'info> {
     #[account(mut)]
@@ -970,6 +1117,8 @@ pub enum PoolError {
 /// proof verify, so refuse to build until the ceremony key is in place.
 const _: () = assert!(VERIFYINGKEY.vk_alpha_g1[0] != 0 || VERIFYINGKEY.vk_alpha_g1[1] != 0);
 const _: () = assert!(VERIFYINGKEY.nr_pubinputs == PUBLIC_INPUTS);
+const _: () = assert!(VERIFYINGKEY_ASSOC.nr_pubinputs == PUBLIC_INPUTS_ASSOC);
+const _: () = assert!(VERIFYINGKEY_ASSOC.vk_alpha_g1[0] != 0 || VERIFYINGKEY_ASSOC.vk_alpha_g1[1] != 0);
 
 #[cfg(test)]
 mod tests {

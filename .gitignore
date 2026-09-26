@@ -16,3 +16,7 @@ test-ledger*/
 validator*.log
 circuits/ceremony/*.ptau
 receipts-*.json
+# Throwaway keys for the association-set tests: generated locally, never the
+# ceremony's. Committing one would invite someone to deploy against it.
+circuits/assoc-build/
+circuits/pot15_final.ptau
