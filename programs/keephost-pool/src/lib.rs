@@ -375,6 +375,116 @@ pub mod keephost_pool {
         Ok(())
     }
 
+    /// Opens a drop: an airdrop that pays into a shielded pool instead of into
+    /// wallets.
+    ///
+    /// The project funds the vault and publishes the root of its allocation
+    /// tree, exactly as it would for an ordinary claim page. What changes is
+    /// where the tokens land: eligible addresses do not receive anything, they
+    /// register a commitment. Claiming it later is a withdrawal like any other,
+    /// to any address, and nothing ties the wallet that earned the allocation
+    /// to the wallet that gets paid.
+    pub fn open_drop(ctx: Context<OpenDrop>, allocation_root: [u8; 32], recipients: u32) -> Result<()> {
+        require!(recipients > 0, PoolError::BadDenomination);
+        require!(allocation_root != [0u8; 32], PoolError::NotFieldElement);
+
+        let denomination = ctx.accounts.pool.load()?.denomination;
+        // The vault is funded up front for every allocation. A drop that could
+        // run out halfway would be a claim page that works for the fast and
+        // fails for everyone else.
+        let total = denomination
+            .checked_mul(recipients as u64)
+            .ok_or(error!(PoolError::BadDenomination))?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.funder.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            total,
+        )?;
+
+        let drop = &mut ctx.accounts.drop;
+        drop.pool = ctx.accounts.pool.key();
+        drop.allocation_root = allocation_root;
+        drop.recipients = recipients;
+        drop.registered = 0;
+        drop.bump = ctx.bumps.drop;
+
+        emit!(DropOpened {
+            drop: drop.key(),
+            pool: drop.pool,
+            allocation_root,
+            recipients,
+            denomination,
+        });
+        Ok(())
+    }
+
+    /// Registers an eligible address into the drop's pool.
+    ///
+    /// The caller proves its address is a leaf of the allocation tree — an
+    /// ordinary Merkle proof, checked here, no zero-knowledge needed — and
+    /// writes a commitment of its own choosing into the pool. This transaction
+    /// is public and says one thing: that this address registered. It does not
+    /// say where the tokens will go, because that is not decided yet and never
+    /// passes through here.
+    ///
+    /// One registration per eligible address: the `claimed` account is created
+    /// with `init`, so a second attempt fails.
+    pub fn register_claim(
+        ctx: Context<RegisterClaim>,
+        commitment: [u8; 32],
+        path: Vec<[u8; 32]>,
+        indices: Vec<u8>,
+    ) -> Result<()> {
+        require!(is_field_element(&commitment), PoolError::NotFieldElement);
+        require!(commitment != [0u8; 32], PoolError::NotFieldElement);
+        require!(path.len() == indices.len(), PoolError::BadProof);
+        require!(path.len() <= LEVELS, PoolError::BadProof);
+
+        let (allocation_root, registered, recipients) = {
+            let drop = &ctx.accounts.drop;
+            (drop.allocation_root, drop.registered, drop.recipients)
+        };
+        require!(registered < recipients, PoolError::TreeFull);
+
+        // The leaf is the address itself, hashed: a Merkle tree of allocations
+        // is the shape every claim page already uses.
+        let mut leaf = poseidon_addr(&ctx.accounts.claimer.key().to_bytes())?;
+        for (sibling, side) in path.iter().zip(indices.iter()) {
+            leaf = if *side == 0 { poseidon2(&leaf, sibling)? } else { poseidon2(sibling, &leaf)? };
+        }
+        require!(leaf == allocation_root, PoolError::NotEligible);
+
+        let claimed = &mut ctx.accounts.claimed;
+        claimed.drop = ctx.accounts.drop.key();
+        claimed.who = ctx.accounts.claimer.key();
+
+        let pool = &mut ctx.accounts.pool.load_mut()?;
+        require!(pool.paused == 0, PoolError::Paused);
+        let leaf_index = pool.next_index;
+        let root = append_leaf(&mut pool.filled_subtrees, leaf_index, commitment)?;
+        pool.next_index = leaf_index + 1;
+        pool.deposits = pool.deposits.saturating_add(1);
+        let slot = (pool.current_root_index as usize + 1) % ROOT_HISTORY;
+        pool.current_root_index = slot as u8;
+        pool.roots[slot] = root;
+
+        ctx.accounts.drop.registered = registered + 1;
+
+        emit!(Deposited {
+            pool: ctx.accounts.pool.key(),
+            commitment,
+            leaf_index,
+            root,
+            at: Clock::get()?.unix_timestamp,
+        });
+        Ok(())
+    }
+
     /// Publishes an association set: a root, a label, and who published it.
     ///
     /// Anyone can publish one, and the program never ranks them. A set is worth
@@ -682,6 +792,18 @@ fn insert_leaf(pool: &mut Pool, leaf: [u8; 32]) -> Result<[u8; 32]> {
     append_leaf(&mut pool.filled_subtrees, next, leaf)
 }
 
+/// An allocation leaf: the eligible address, hashed into the field. Hashing it
+/// keeps every leaf a field element, which is what the tree is made of.
+fn poseidon_addr(addr: &[u8; 32]) -> Result<[u8; 32]> {
+    // The top two bits are cleared so the value is always below the field
+    // order; an address is 32 bytes and the field is slightly smaller.
+    let mut a = *addr;
+    a[0] &= 0x3f;
+    let h = hashv(Parameters::Bn254X5, Endianness::BigEndian, &[&a])
+        .map_err(|_| error!(PoolError::HashFailed))?;
+    Ok(h.to_bytes())
+}
+
 fn poseidon2(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32]> {
     let h = hashv(Parameters::Bn254X5, Endianness::BigEndian, &[left, right])
         .map_err(|_| error!(PoolError::HashFailed))?;
@@ -954,6 +1076,78 @@ pub struct WithdrawnFromSet {
 }
 
 #[derive(Accounts)]
+pub struct OpenDrop<'info> {
+    #[account(mut)]
+    pub funder: Signer<'info>,
+    #[account(mut)]
+    pub pool: AccountLoader<'info, Pool>,
+    /// CHECK: vault PDA, checked by its seeds.
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
+    #[account(
+        init,
+        payer = funder,
+        space = Drop::SIZE,
+        seeds = [b"drop", pool.key().as_ref()],
+        bump
+    )]
+    pub drop: Account<'info, Drop>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RegisterClaim<'info> {
+    #[account(mut)]
+    pub claimer: Signer<'info>,
+    #[account(mut, seeds = [b"drop", pool.key().as_ref()], bump = drop.bump)]
+    pub drop: Account<'info, Drop>,
+    #[account(mut)]
+    pub pool: AccountLoader<'info, Pool>,
+    /// One registration per eligible address: `init` makes the second fail.
+    #[account(
+        init,
+        payer = claimer,
+        space = Claimed::SIZE,
+        seeds = [b"claimed", drop.key().as_ref(), claimer.key().as_ref()],
+        bump
+    )]
+    pub claimed: Account<'info, Claimed>,
+    pub system_program: Program<'info, System>,
+}
+
+#[account]
+pub struct Drop {
+    pub pool: Pubkey,
+    pub allocation_root: [u8; 32],
+    pub recipients: u32,
+    pub registered: u32,
+    pub bump: u8,
+}
+
+impl Drop {
+    pub const SIZE: usize = 8 + 32 + 32 + 4 + 4 + 1;
+}
+
+#[account]
+pub struct Claimed {
+    pub drop: Pubkey,
+    pub who: Pubkey,
+}
+
+impl Claimed {
+    pub const SIZE: usize = 8 + 32 + 32;
+}
+
+#[event]
+pub struct DropOpened {
+    pub drop: Pubkey,
+    pub pool: Pubkey,
+    pub allocation_root: [u8; 32],
+    pub recipients: u32,
+    pub denomination: u64,
+}
+
+#[derive(Accounts)]
 #[instruction(root: [u8; 32])]
 pub struct PublishSet<'info> {
     #[account(mut)]
@@ -1109,6 +1303,8 @@ pub enum PoolError {
     HashFailed,
     #[msg("This pool has no pause authority")]
     NoPauseAuthority,
+    #[msg("This address is not in the drop's allocation")]
+    NotEligible,
     #[msg("Only the pause authority can do this")]
     NotPauseAuthority,
 }

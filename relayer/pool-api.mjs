@@ -32,6 +32,10 @@ const relayer = KEYPAIR_FILE ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(
 const disc = (name) => createHash("sha256").update(`global:${name}`).digest().subarray(0, 8);
 const eventDisc = (name) => createHash("sha256").update(`event:${name}`).digest().subarray(0, 8);
 const DEPOSITED = eventDisc("Deposited");
+const WITHDRAWN = eventDisc("Withdrawn");
+// What the activity feed keeps. Enough to show a pool is alive, bounded so an
+// index that has run for months still answers in one page.
+const ACTIVITY_MAX = 120;
 const u64 = (v) => {
   const b = Buffer.alloc(8);
   b.writeBigUInt64LE(BigInt(v));
@@ -69,7 +73,15 @@ function persist() {
 
 async function refresh(denom) {
   const key = String(denom);
-  const state = index.get(key) || { leaves: [], until: null, at: 0 };
+  const state = index.get(key) || { leaves: [], activity: [], until: null, at: 0 };
+  // An index written before the activity feed existed knows its leaves but has
+  // no history to show. Rather than ask anyone to delete a file, it rescans
+  // once: `until` is what makes the scan incremental, so clearing it replays
+  // the pool from the beginning and fills the feed.
+  if (!state.activity) {
+    state.activity = [];
+    if (state.leaves.some(Boolean)) state.until = null;
+  }
   if (Date.now() - state.at < 4000) return state;
   const pool = poolPda(denom);
   const sigs = [];
@@ -92,6 +104,17 @@ async function refresh(denom) {
       else if (line.startsWith(`Program ${PROGRAM_ID.toBase58()} success`) || line.startsWith(`Program ${PROGRAM_ID.toBase58()} failed`)) depth = Math.max(0, depth - 1);
       else if (depth > 0 && line.startsWith("Program data: ")) {
         const raw = Buffer.from(line.slice("Program data: ".length), "base64");
+        if (raw.length >= 120 && raw.subarray(0, 8).equals(WITHDRAWN)) {
+          // Withdrawn: pool(32) · nullifierHash(32) · recipient(32) · relayer(32) · fee(8) · at(8)
+          if (!raw.subarray(8, 40).equals(pool.toBuffer())) continue;
+          state.activity.push({
+            kind: "out",
+            at: s.blockTime ?? null,
+            signature: s.signature,
+            recipient: new PublicKey(raw.subarray(72, 104)).toBase58(),
+          });
+          continue;
+        }
         if (raw.length < 76 || !raw.subarray(0, 8).equals(DEPOSITED)) continue;
         // Opening a pool is permissionless, so the same program emits genuine
         // deposit events for pools that are not this one. A transaction that
@@ -103,9 +126,18 @@ async function refresh(denom) {
         const leafIndex = raw.readUInt32LE(72);
         if (leafIndex >= 1 << 20) continue;
         state.leaves[leafIndex] = commitment;
+        state.activity.push({
+          kind: "in",
+          at: s.blockTime ?? null,
+          signature: s.signature,
+          index: leafIndex,
+        });
       }
     }
   }
+  // The feed is what a visitor reads first: newest on top, and only the tail
+  // kept so it stays one page however long the pool has been running.
+  if (state.activity.length > ACTIVITY_MAX) state.activity = state.activity.slice(-ACTIVITY_MAX);
   if (sigs.length) state.until = sigs[sigs.length - 1].signature;
   state.at = Date.now();
   index.set(key, state);
@@ -164,6 +196,15 @@ createServer(async (req, res) => {
         pools.push({ denomination: denom, address: pool.toBase58(), open: !!info, vaultLamports: vault });
       }
       return send(res, 200, { cluster: CLUSTER, programId: PROGRAM_ID.toBase58(), relayer: relayer?.publicKey.toBase58() ?? null, fee: FEE.toString(), pools });
+    }
+
+    const activityMatch = url.pathname.match(/^\/pool\/(\d+)\/activity$/);
+    if (req.method === "GET" && activityMatch) {
+      const state = await refresh(activityMatch[1]);
+      // Deposits and withdrawals in one list, newest first. Nothing here links
+      // one to the other, and that is the point: a reader can count both and
+      // still not pair them.
+      return send(res, 200, { activity: [...(state.activity ?? [])].reverse() });
     }
 
     const leavesMatch = url.pathname.match(/^\/pool\/(\d+)\/leaves$/);
