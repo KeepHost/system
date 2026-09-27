@@ -85,6 +85,28 @@ async function main() {
   );
 
   // --- open the pool ---------------------------------------------------------
+  // With --grief, fund the vault address before the pool exists. That address
+  // is derivable in advance, so anyone can do it, and `create_account` refuses
+  // an address that already holds anything — while nothing in this program can
+  // ever sign a transfer back out of it.
+  //
+  // It costs the rent-exempt minimum rather than one lamport: the runtime
+  // rejects any transaction that would leave an account rent-paying, which is
+  // the only thing making this attack cost more than dust. If opening still
+  // succeeds after this, the pool cannot be bricked.
+  if (args.grief && !(await conn.getAccountInfo(vault))) {
+    const lamports = await conn.getMinimumBalanceForRentExemption(0);
+    await sendAndConfirmTransaction(
+      conn,
+      new Transaction().add(
+        SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: vault, lamports }),
+      ),
+      [payer],
+      { commitment: "confirmed" },
+    );
+    log(`grief: ${lamports} lamports parked on the vault address before it exists`);
+  }
+
   if (!(await conn.getAccountInfo(pool))) {
     const ix = new TransactionInstruction({
       programId: PROGRAM_ID,

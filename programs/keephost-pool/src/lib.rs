@@ -188,19 +188,58 @@ pub mod keephost_pool {
         // not ours, and it has never changed.
         let space = 165usize;
         let lamports = SolRent::get()?.minimum_balance(space);
-        anchor_lang::system_program::create_account(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::CreateAccount {
-                    from: ctx.accounts.creator.to_account_info(),
-                    to: ctx.accounts.vault.to_account_info(),
-                },
-                &[vault_seeds],
-            ),
-            lamports,
-            space as u64,
-            &ctx.accounts.token_program.key(),
-        )?;
+
+        // `create_account` refuses an address that already holds a single
+        // lamport, and this vault's address is derivable before it exists:
+        // anyone could send it 1 lamport and brick that mint and denomination
+        // for good — nothing here can ever sign a transfer back out of it.
+        // So we do what Anchor's `init` does in the same situation: top the
+        // account up, then allocate and assign it ourselves.
+        let existing = ctx.accounts.vault.lamports();
+        if existing == 0 {
+            anchor_lang::system_program::create_account(
+                CpiContext::new_with_signer(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::CreateAccount {
+                        from: ctx.accounts.creator.to_account_info(),
+                        to: ctx.accounts.vault.to_account_info(),
+                    },
+                    &[vault_seeds],
+                ),
+                lamports,
+                space as u64,
+                &ctx.accounts.token_program.key(),
+            )?;
+        } else {
+            if existing < lamports {
+                anchor_lang::system_program::transfer(
+                    CpiContext::new(
+                        ctx.accounts.system_program.to_account_info(),
+                        anchor_lang::system_program::Transfer {
+                            from: ctx.accounts.creator.to_account_info(),
+                            to: ctx.accounts.vault.to_account_info(),
+                        },
+                    ),
+                    lamports - existing,
+                )?;
+            }
+            anchor_lang::system_program::allocate(
+                CpiContext::new_with_signer(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Allocate { account_to_allocate: ctx.accounts.vault.to_account_info() },
+                    &[vault_seeds],
+                ),
+                space as u64,
+            )?;
+            anchor_lang::system_program::assign(
+                CpiContext::new_with_signer(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Assign { account_to_assign: ctx.accounts.vault.to_account_info() },
+                    &[vault_seeds],
+                ),
+                &ctx.accounts.token_program.key(),
+            )?;
+        }
         spl::initialize_account3(
             &ctx.accounts.token_program,
             &ctx.accounts.vault,
