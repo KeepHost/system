@@ -287,6 +287,18 @@ pub mod keephost_pool {
     /// before sets existed keeps working through `withdraw`, and both share the
     /// same nullifier account, so a deposit still cannot be spent twice by
     /// taking the other door.
+    /// GATED. The association-set path is compiled only with the `assoc`
+    /// feature, and that feature must stay off until VERIFYINGKEY_ASSOC comes
+    /// from the public ceremony instead of the throwaway key this repository
+    /// generates for its own tests.
+    ///
+    /// The reason is not tidiness. This instruction pays out of the *same*
+    /// vault as `withdraw`, which holds live mainnet SOL. Shipping it with a
+    /// test key would graft a second trusted setup onto money that is already
+    /// deposited, and anyone holding that key's trapdoor could forge a proof
+    /// for any root already in the pool's history and drain the vault. A note
+    /// in a Markdown file is not a deployment gate; this is.
+    #[cfg(feature = "assoc")]
     pub fn withdraw_with_set<'info>(
         ctx: Context<'_, '_, '_, 'info, WithdrawWithSet<'info>>,
         proof_a: [u8; 64],
@@ -497,6 +509,7 @@ pub mod keephost_pool {
     /// circuit with the second Merkle inclusion, which needs the proving key
     /// the public ceremony is producing. Publishing early is deliberate: a set
     /// is only useful once it has a history.
+    #[cfg(feature = "assoc")]
     pub fn publish_set(ctx: Context<PublishSet>, root: [u8; 32], label: [u8; 32]) -> Result<()> {
         require!(is_field_element(&root), PoolError::NotFieldElement);
         require!(root != [0u8; 32], PoolError::NotFieldElement);
@@ -1033,6 +1046,7 @@ pub struct TokenPoolOpened {
     pub denomination: u64,
 }
 
+#[cfg(feature = "assoc")]
 #[derive(Accounts)]
 #[instruction(proof_a: [u8; 64], proof_b: [u8; 128], proof_c: [u8; 64], root: [u8; 32], nullifier_hash: [u8; 32])]
 pub struct WithdrawWithSet<'info> {
@@ -1147,6 +1161,7 @@ pub struct DropOpened {
     pub denomination: u64,
 }
 
+#[cfg(feature = "assoc")]
 #[derive(Accounts)]
 #[instruction(root: [u8; 32])]
 pub struct PublishSet<'info> {

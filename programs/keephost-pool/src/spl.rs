@@ -37,7 +37,14 @@ pub fn transfer<'info>(
         vec![
             AccountMeta::new(from.key(), false),
             AccountMeta::new(to.key(), false),
-            AccountMeta::new_readonly(authority.key(), signer_seeds.is_none()),
+            // The authority always signs: a wallet signs the transaction, a PDA
+            // signs through invoke_signed. The flag was inverted, so every PDA
+            // transfer built a meta saying "not a signer" — and seeds only
+            // authorise an account already marked as one. The token program then
+            // returned MissingRequiredSignature, which made withdraw_token fail
+            // unconditionally while deposit_token kept working: tokens went into
+            // a vault no instruction could ever pay out of.
+            AccountMeta::new_readonly(authority.key(), true),
         ],
     );
     let accounts = [from.clone(), to.clone(), authority.clone(), token_program.clone()];
