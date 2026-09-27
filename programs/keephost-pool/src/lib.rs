@@ -392,6 +392,13 @@ pub mod keephost_pool {
         invoke_signed(
             &system_instruction::transfer(
                 &ctx.accounts.vault.key(),
+        // NOTE, before this path is ever enabled: `withdraw` pays the relayer
+        // out of the deposit-fee pot when the pot can cover it, and hands the
+        // user the full denomination. This path has no `fees` account, so it
+        // always takes the fee out of the user's deposit instead — the
+        // compliant withdrawal is strictly more expensive than the ordinary
+        // one, which is exactly the wrong incentive. Give WithdrawWithSet the
+        // same `fees` account and the same subsidy before turning `assoc` on.
                 &ctx.accounts.recipient.key(),
                 denomination - fee,
             ),

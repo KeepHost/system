@@ -20,6 +20,11 @@ changed.
 > publisher anyone has reason to trust, this is a labelling mechanism and not a
 > compliance one — and an integrator who reads "used a set" as "screened" is
 > being misled by us rather than by the attacker.
+>
+> There is also an incentive bug waiting in it: the ordinary withdrawal pays the
+> relayer out of the deposit-fee pot when that pot can cover it, and this path
+> does not, so a compliant withdrawal costs the user more than a plain one. That
+> gets fixed before the feature is enabled, not after.
 
 ## The problem it solves
 

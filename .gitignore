@@ -20,3 +20,8 @@ receipts-*.json
 # ceremony's. Committing one would invite someone to deploy against it.
 circuits/assoc-build/
 circuits/pot15_final.ptau
+build-spl.log
+e2e-token.log
+grief.log
+validatorT.log
+.ledgerT/
