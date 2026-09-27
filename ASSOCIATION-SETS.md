@@ -1,6 +1,25 @@
 # Association sets
 
-The thing that makes this not a mixer, and the reason the circuit changed.
+The thing that is meant to make this not a mixer, and the reason the circuit
+changed.
+
+> **Not deployed, and not a control yet.** This path compiles only under the
+> `assoc` build feature, which is off, for two reasons that a reader should have
+> before anything else here.
+>
+> Its verifying key currently comes from a throwaway ceremony this repository
+> generates for its own tests, and the instruction pays out of the **same vault
+> as `withdraw`** — the one holding live mainnet SOL. Shipping it as it stands
+> would let anyone holding that key's trapdoor forge a withdrawal against money
+> that is already deposited.
+>
+> And as written, **the prover chooses the set root**. `publish_set` is
+> permissionless, so an attacker can publish a set whose single leaf is their own
+> deposit, label it whatever they like, and withdraw through it. On chain that is
+> indistinguishable from a compliant withdrawal. Until a set is bound to a
+> publisher anyone has reason to trust, this is a labelling mechanism and not a
+> compliance one — and an integrator who reads "used a set" as "screened" is
+> being misled by us rather than by the attacker.
 
 ## The problem it solves
 
